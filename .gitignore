@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target/
+/host/target/
+/guest/target/
+
+# Foundry build artifacts
+/contracts/cache/
+/contracts/out/
+lib/target/
+lib/Cargo.lock
+guest/build/
+**/target/
