@@ -83,6 +83,30 @@ impl ZiskProver {
             .ok_or_else(|| anyhow::anyhow!("no aggregator ELF configured (--aggregator-elf)"))
     }
 
+    /// Work dir for a per-batch proving run (per-batch and vadcop flows).
+    fn batch_work_dir(&self, batch_number: u64) -> PathBuf {
+        self.work_dir_base.join(format!("batch_{batch_number}"))
+    }
+
+    /// Work dir for an aggregation-range proving run.
+    fn range_work_dir(&self, from_batch: u64, to_batch: u64) -> PathBuf {
+        self.work_dir_base
+            .join(format!("range_{from_batch}_{to_batch}"))
+    }
+
+    /// Remove a per-batch run's work dir. The run loop calls this only after
+    /// the proof has been submitted, so the artifacts survive a submit
+    /// failure for a retry/diagnosis.
+    pub async fn cleanup_batch_work_dir(&self, batch_number: u64) {
+        let _ = tokio::fs::remove_dir_all(self.batch_work_dir(batch_number)).await;
+    }
+
+    /// Remove an aggregation-range run's work dir (after submit; see
+    /// [`Self::cleanup_batch_work_dir`]).
+    pub async fn cleanup_range_work_dir(&self, from_batch: u64, to_batch: u64) {
+        let _ = tokio::fs::remove_dir_all(self.range_work_dir(from_batch, to_batch)).await;
+    }
+
     /// One-time ROM setup for the STF guest ELF (`cargo-zisk
     /// program-setup`). Must run before the first `prove` for a given guest
     /// ELF; subsequent runs are cheap. Returns `Ok(false)` if cancelled.
@@ -138,7 +162,7 @@ impl ZiskProver {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<ZiskSnarkOutput>> {
         let start = Instant::now();
-        let work_dir = self.work_dir_base.join(format!("batch_{batch_number}"));
+        let work_dir = self.batch_work_dir(batch_number);
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
         tokio::fs::create_dir_all(&work_dir).await?;
 
@@ -172,7 +196,7 @@ impl ZiskProver {
         cancel: &CancellationToken,
     ) -> anyhow::Result<Option<Vec<u8>>> {
         let start = Instant::now();
-        let work_dir = self.work_dir_base.join(format!("batch_{batch_number}"));
+        let work_dir = self.batch_work_dir(batch_number);
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
         tokio::fs::create_dir_all(&work_dir).await?;
 
@@ -211,9 +235,7 @@ impl ZiskProver {
         let input = crate::aggregator_input::assemble(streams)?;
 
         let start = Instant::now();
-        let work_dir = self
-            .work_dir_base
-            .join(format!("range_{from_batch}_{to_batch}"));
+        let work_dir = self.range_work_dir(from_batch, to_batch);
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
         tokio::fs::create_dir_all(&work_dir).await?;
 
@@ -297,8 +319,11 @@ impl ZiskProver {
         Ok(true)
     }
 
-    /// Record metrics/logs for a finished proving run and clean up the work
-    /// dir (kept on failure for debugging).
+    /// Record metrics/logs for a finished proving run. The work dir is kept
+    /// on success — the run loop removes it (via `cleanup_*_work_dir`) only
+    /// after the proof has been submitted, so a submit failure doesn't lose
+    /// the artifacts — and kept on failure for debugging; only a cancelled
+    /// run's dir is removed here.
     async fn finish_run<T>(
         &self,
         label: &str,
@@ -317,8 +342,15 @@ impl ZiskProver {
 
         match &result {
             Ok(Some(_)) => {
-                tracing::info!(label, elapsed_secs = elapsed.as_secs(), "proof generated");
-                let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                // Kept until submit succeeds (removed by the run loop via
+                // cleanup_*_work_dir): a submit failure must not lose the
+                // artifacts.
+                tracing::info!(
+                    label,
+                    elapsed_secs = elapsed.as_secs(),
+                    path = %work_dir.display(),
+                    "proof generated (work dir kept until submit)"
+                );
             }
             Ok(None) => {
                 tracing::info!(label, "proof cancelled by shutdown");
@@ -353,8 +385,11 @@ fn write_zisk_input(path: &Path, bincode: &[u8]) -> anyhow::Result<()> {
 
 /// Run a subprocess, cancellable via token. Uses `tokio::process` — no polling.
 ///
-/// stdout/stderr are inherited (not piped) to avoid blocking cargo-zisk's
-/// 200+ threads on pipe buffer contention during proof generation.
+/// stdout/stderr are inherited so `cargo-zisk`'s progress and error output
+/// reaches the daemon's console/logs: swallowing the subprocess output makes
+/// field failures undiagnosable. Inheriting (rather than piping to capture)
+/// also avoids blocking cargo-zisk's 200+ threads on pipe-buffer contention
+/// during proof generation.
 async fn run_cancellable(
     binary: &Path,
     args: &[String],
@@ -362,8 +397,8 @@ async fn run_cancellable(
 ) -> anyhow::Result<bool> {
     let mut child = tokio::process::Command::new(binary)
         .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
         .spawn()?;
 
     tokio::select! {
@@ -810,5 +845,76 @@ mod tests {
         let err = parse_proof_file(&path).unwrap_err().to_string();
         std::fs::remove_dir_all(&dir).ok();
         assert!(err.contains("Vadcop"), "unexpected error: {err}");
+    }
+
+    fn test_prover(work_dir_base: PathBuf) -> ZiskProver {
+        ZiskProver::new(
+            PathBuf::from("/nonexistent-cargo-zisk"),
+            PathBuf::from("/nonexistent-elf"),
+            None,
+            PathBuf::from("/nonexistent-proving-key"),
+            PathBuf::from("/nonexistent-proving-key-plonk"),
+            work_dir_base,
+            false,
+            false,
+        )
+    }
+
+    /// `finish_run` must keep the work dir on success (submit hasn't run yet)
+    /// and on failure (debugging), and remove it only on cancellation. The
+    /// submitted run's dir is then reclaimed by `cleanup_batch_work_dir`.
+    #[tokio::test]
+    async fn finish_run_keeps_work_dir_until_submit() {
+        let base = std::env::temp_dir().join(format!(
+            "zisk_finish_run_test_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = tokio::fs::remove_dir_all(&base).await;
+        let prover = test_prover(base.clone());
+
+        // Success: kept — the proof still needs to be submitted.
+        let success_dir = prover.batch_work_dir(1);
+        tokio::fs::create_dir_all(&success_dir).await.unwrap();
+        let ok: anyhow::Result<Option<()>> = Ok(Some(()));
+        prover
+            .finish_run("batch 1", &success_dir, Instant::now(), ok)
+            .await
+            .unwrap();
+        assert!(
+            success_dir.exists(),
+            "work dir must survive a successful run until submit"
+        );
+
+        // Failure: kept for debugging.
+        let failure_dir = prover.batch_work_dir(2);
+        tokio::fs::create_dir_all(&failure_dir).await.unwrap();
+        let err: anyhow::Result<Option<()>> = Err(anyhow::anyhow!("boom"));
+        let _ = prover
+            .finish_run("batch 2", &failure_dir, Instant::now(), err)
+            .await;
+        assert!(failure_dir.exists(), "work dir must survive a failed run");
+
+        // Cancelled: removed (the daemon exits; no submit will follow).
+        let cancelled_dir = prover.batch_work_dir(3);
+        tokio::fs::create_dir_all(&cancelled_dir).await.unwrap();
+        let cancelled: anyhow::Result<Option<()>> = Ok(None);
+        prover
+            .finish_run("batch 3", &cancelled_dir, Instant::now(), cancelled)
+            .await
+            .unwrap();
+        assert!(
+            !cancelled_dir.exists(),
+            "work dir must be removed on cancellation"
+        );
+
+        // After submit, the run loop reclaims the kept dir.
+        prover.cleanup_batch_work_dir(1).await;
+        assert!(
+            !success_dir.exists(),
+            "cleanup_batch_work_dir must remove the work dir post-submit"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

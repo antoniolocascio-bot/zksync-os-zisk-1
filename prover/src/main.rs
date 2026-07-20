@@ -245,21 +245,46 @@ async fn main() -> anyhow::Result<()> {
                     );
                     let streams: Vec<Vec<u8>> =
                         job.streams.into_iter().map(|(_, stream)| stream).collect();
-                    let result = prover
+                    // A transient proof-gen/submit failure must not kill the
+                    // daemon: log + retry like the pick path above, so one bad
+                    // run doesn't take down the whole ZiSK lane.
+                    let result = match prover
                         .generate_aggregated_proof(&streams, job.from_batch, job.to_batch, &cancel)
-                        .await?;
-                    let Some(result) = result else {
-                        tracing::info!("aggregated proof cancelled, exiting");
-                        break;
+                        .await
+                    {
+                        Ok(Some(result)) => result,
+                        Ok(None) => {
+                            tracing::info!("aggregated proof cancelled, exiting");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                from = job.from_batch,
+                                to = job.to_batch,
+                                "aggregated proof generation failed, will retry: {e:#}"
+                            );
+                            continue;
+                        }
                     };
-                    client
+                    if let Err(e) = client
                         .submit_aggregated_proof(
                             job.from_batch,
                             job.to_batch,
                             &result.proof,
                             &result.public_values,
                         )
-                        .await?;
+                        .await
+                    {
+                        tracing::warn!(
+                            from = job.from_batch,
+                            to = job.to_batch,
+                            "aggregated proof submit failed, will retry: {e:#}"
+                        );
+                        continue;
+                    }
+                    prover
+                        .cleanup_range_work_dir(job.from_batch, job.to_batch)
+                        .await;
                     tracing::info!(
                         from = job.from_batch,
                         to = job.to_batch,
@@ -322,31 +347,62 @@ async fn main() -> anyhow::Result<()> {
         );
 
         // Prove. Uses tokio::process internally — cancellation is instant.
+        // A transient proof-gen/submit failure must not kill the daemon: it is
+        // logged and the batch retried (via `continue`), exactly like the pick
+        // failures above — one bad run doesn't terminate the whole daemon.
         if args.aggregation {
             // Aggregated mode: keep the vadcop_final proof (no PLONK wrap)
             // and submit the stream; its publics travel inside it.
-            let result = prover
+            let stream = match prover
                 .generate_vadcop_proof(&batch.zisk_data, batch.batch_number, &cancel)
-                .await?;
-            let Some(stream) = result else {
-                tracing::info!("proof cancelled, exiting");
-                break;
+                .await
+            {
+                Ok(Some(stream)) => stream,
+                Ok(None) => {
+                    tracing::info!("proof cancelled, exiting");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        batch = batch.batch_number,
+                        "proof generation failed, will retry: {e:#}"
+                    );
+                    continue;
+                }
             };
             tracing::info!(
                 batch = batch.batch_number,
                 stream_bytes = stream.len(),
                 "vadcop_final proof generated"
             );
-            client
+            if let Err(e) = client
                 .submit_zisk_proof(batch.batch_number, &batch.vk_hash, &stream, &[])
-                .await?;
+                .await
+            {
+                tracing::warn!(
+                    batch = batch.batch_number,
+                    "proof submit failed, will retry: {e:#}"
+                );
+                continue;
+            }
+            prover.cleanup_batch_work_dir(batch.batch_number).await;
         } else {
-            let result = prover
+            let result = match prover
                 .generate_proof(&batch.zisk_data, batch.batch_number, &cancel)
-                .await?;
-            let Some(result) = result else {
-                tracing::info!("proof cancelled, exiting");
-                break;
+                .await
+            {
+                Ok(Some(result)) => result,
+                Ok(None) => {
+                    tracing::info!("proof cancelled, exiting");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        batch = batch.batch_number,
+                        "proof generation failed, will retry: {e:#}"
+                    );
+                    continue;
+                }
             };
             tracing::info!(
                 batch = batch.batch_number,
@@ -354,14 +410,22 @@ async fn main() -> anyhow::Result<()> {
                 pv_bytes = result.public_values.len(),
                 "proof generated"
             );
-            client
+            if let Err(e) = client
                 .submit_zisk_proof(
                     batch.batch_number,
                     &batch.vk_hash,
                     &result.proof,
                     &result.public_values,
                 )
-                .await?;
+                .await
+            {
+                tracing::warn!(
+                    batch = batch.batch_number,
+                    "proof submit failed, will retry: {e:#}"
+                );
+                continue;
+            }
+            prover.cleanup_batch_work_dir(batch.batch_number).await;
         }
 
         tracing::info!(batch = batch.batch_number, "proof submitted");
