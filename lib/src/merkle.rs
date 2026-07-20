@@ -421,8 +421,8 @@ impl BatchTreeUpdate {
     /// recording every node into an `authenticated` map (`O(W·depth)`), then
     /// pass 2 recomputes the new root from that map. The streaming `apply` above
     /// must reproduce its `(new_root, new_leaf_count)` bit-for-bit.
-    #[cfg(test)]
-    pub(crate) fn apply_reference(&self, expected_old_root: &B256) -> (B256, u64) {
+    #[cfg(any(test, feature = "bench-internals"))]
+    pub fn apply_reference(&self, expected_old_root: &B256) -> (B256, u64) {
         let mut authenticated: std::collections::HashMap<(u8, u64), B256> =
             std::collections::HashMap::new();
         let old_root =
@@ -441,7 +441,7 @@ impl BatchTreeUpdate {
     /// `intermediate_hashes` in traversal order and recording every node this
     /// pass touches (leaf hashes, consumed siblings, computed internal nodes)
     /// into `authenticated`, keyed by (depth, index-at-depth).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     fn zip_and_record(
         &self,
         sorted_leaves: &[(u64, TreeLeaf)],
@@ -513,7 +513,7 @@ impl BatchTreeUpdate {
     /// at `leaf_count_before`, so a sibling subtree that starts at or beyond
     /// `leaf_count_before` and contains no computed node holds no leaves at
     /// all in the new tree.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     fn zip_from_authenticated(
         &self,
         sorted_leaves: &[(u64, TreeLeaf)],
@@ -571,7 +571,7 @@ impl BatchTreeUpdate {
     }
 
     /// Resolve an off-path sibling for the new-root pass.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     fn resolve_sibling(
         depth: u8,
         sibling_idx: u64,

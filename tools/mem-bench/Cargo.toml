@@ -1,0 +1,25 @@
+[package]
+name = "zksync-os-zisk-mem-bench"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Peak-heap benchmark harness for the two guest-memory fixes:
+#   FIX A — streaming storage-proof deserialize (read-spam)
+#   FIX B — streaming O(W) tree update            (write-spam)
+# Baseline (pre-fix code path) vs fixed, over the REAL library code, measured
+# with a tracking global allocator. Host-runnable only (no GPU / guest ELF).
+# `bench-internals` exposes the pre-FIX-B `BatchTreeUpdate::apply_reference`.
+
+[dependencies]
+zksync-os-zisk-lib = { path = "../../lib", features = ["bench-internals"] }
+alloy-primitives = { version = "1", default-features = false }
+bincode = "1.3"
+
+[[bin]]
+name = "mem-bench"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

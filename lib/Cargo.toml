@@ -23,3 +23,7 @@ serde_json = "1"
 default = ["c-libs"]
 # Enable C-based crypto (secp256k1, blst, c-kzg) — for native builds
 c-libs = ["revm/secp256k1", "revm/blst", "revm/c-kzg", "zksync-os-revm/c-libs"]
+# Expose the pre-FIX-B two-pass `BatchTreeUpdate::apply_reference` (the A/B
+# oracle) to out-of-crate benchmarks (`tools/mem-bench`). Off by default, so it
+# is never compiled into the guest, prover, or server builds.
+bench-internals = []
