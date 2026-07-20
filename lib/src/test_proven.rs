@@ -1404,4 +1404,148 @@ mod tests {
              rejected despite the witness fields agreeing with each other"
         );
     }
+
+    // ======================= FIX A: streaming deserialize =======================
+
+    /// The streaming entry point (`execute_and_commit_streaming`, guest path)
+    /// must produce a byte-identical commitment AND output to the collecting
+    /// entry point (`execute_and_commit_from_bincode`, server path), from the
+    /// same server-serialized bytes. This is the A/B commitment-equality check.
+    fn assert_ab_streaming_matches(input: &BatchInput) {
+        let bytes = bincode::serialize(input).unwrap();
+        let (out_a, c_a) = executor::execute_and_commit_from_bincode(&bytes).unwrap();
+        let (out_b, c_b) = executor::execute_and_commit_streaming(&bytes).unwrap();
+        assert_eq!(c_a, c_b, "streaming commitment != collecting commitment");
+        assert_eq!(
+            bincode::serialize(&out_a).unwrap(),
+            bincode::serialize(&out_b).unwrap(),
+            "streaming BatchOutput != collecting BatchOutput"
+        );
+    }
+
+    /// Read-spam batch: N distinct cold storage slots (each with a valid
+    /// depth-64 Existing proof) plus the sender account, driven by a single
+    /// `force_fail` L1 tx so execution is trivial and the witness (all the
+    /// merkle siblings) dominates. Models the read-spam OOM vector.
+    fn read_spam_batch(n_slots: usize) -> BatchInput {
+        let sender: Address = "0x1000000000000000000000000000000000000001".parse().unwrap();
+        let recipient: Address = "0x2000000000000000000000000000000000000002".parse().unwrap();
+        let sender_props = encode_account_props(0, U256::from(10_000_000_000_000_000_000u128));
+        let sender_flat = derive_account_properties_key(&sender.into_array());
+
+        let mut data: Vec<(B256, B256)> = Vec::with_capacity(n_slots + 1);
+        data.push((sender_flat, AccountProperties::hash(&sender_props)));
+        let some_addr = [0x11u8; 20];
+        for i in 0..n_slots {
+            let mut slot = [0u8; 32];
+            slot[24..32].copy_from_slice(&(i as u64).to_be_bytes());
+            let fk = derive_flat_storage_key(&some_addr, &B256::from(slot));
+            data.push((fk, B256::repeat_byte((i % 251) as u8 + 1)));
+        }
+        let (root, leaves, siblings) = build_dense_tree(&data);
+
+        let proof_for = |leaf_idx: usize| -> StorageProof {
+            let (idx, leaf) = &leaves[leaf_idx];
+            StorageProof::Existing(SlotProofEntry {
+                index: *idx,
+                value: leaf.value,
+                next_index: leaf.next_index,
+                siblings: siblings[leaf_idx].clone(),
+            })
+        };
+        // data[j] lives at leaves[j + 2] (0,1 are the MIN/MAX guards).
+        let mut storage_proofs = Vec::with_capacity(n_slots + 1);
+        for (j, (k, _)) in data.iter().enumerate() {
+            storage_proofs.push((*k, proof_for(j + 2)));
+        }
+
+        let l1_abi = {
+            let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+            abi[31] = 0x20;
+            abi[32 + 31] = 0x7f;
+            abi[32 + 32 + 12..32 + 32 + 32].copy_from_slice(sender.as_slice());
+            abi[32 + 64 + 12..32 + 64 + 32].copy_from_slice(recipient.as_slice());
+            abi[32 + 96 + 24..32 + 96 + 32].copy_from_slice(&21_000u64.to_be_bytes());
+            abi[32 + 160 + 16..32 + 160 + 32].copy_from_slice(&250_000_000u128.to_be_bytes());
+            abi[32 + 352 + 12..32 + 352 + 32].copy_from_slice(sender.as_slice());
+            let dyn_base = 19u32 * 32;
+            for j in 0..5u32 {
+                let off = 32 + (14 + j as usize) * 32;
+                abi[off + 28..off + 32].copy_from_slice(&(dyn_base + j * 32).to_be_bytes());
+            }
+            abi
+        };
+        let l1_tx_hash = alloy_primitives::keccak256(&l1_abi);
+
+        BatchInput {
+            version: crate::types::BATCH_INPUT_VERSION,
+            chain_id: 270,
+            spec_id: 1,
+            protocol_version_minor: 30,
+            batch_meta: BatchMeta {
+                tree_root_before: root,
+                leaf_count_before: leaves.len() as u64,
+                block_number_before: 0,
+                last_block_timestamp_before: 0,
+                block_hashes_blake_before: empty_ring_blake(),
+                previous_block_hashes: vec![],
+                upgrade_tx_hash: B256::ZERO,
+                da_commitment_scheme: 2,
+                pubdata: vec![],
+                multichain_root: B256::ZERO,
+                sl_chain_id: 0,
+                blob_versioned_hashes: vec![],
+                tree_update: None,
+                account_preimages_after: vec![],
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+            },
+            blocks: vec![BlockInput {
+                number: 1,
+                timestamp: 1700000000,
+                base_fee: 250_000_000,
+                gas_limit: 80_000_000,
+                coinbase: sender,
+                prev_randao: B256::from([1u8; 32]),
+                block_header_hash: B256::ZERO,
+                storage_proofs,
+                account_preimages: vec![(sender, sender_props)],
+                transactions: vec![TxInput {
+                    chain_id: Some(270),
+                    gas_used_override: Some(0),
+                    force_fail: true,
+                    auth: TxAuth::L1 { tx_hash: l1_tx_hash, abi_encoded: l1_abi.clone() },
+                }],
+                block_hashes: vec![],
+                l2_to_l1_logs: vec![L2ToL1LogEntry {
+                    l2_shard_id: 0,
+                    is_service: true,
+                    tx_number_in_block: 0,
+                    sender: "0x0000000000000000000000000000000000008001".parse().unwrap(),
+                    key: l1_tx_hash,
+                    value: B256::ZERO,
+                }],
+                expected_tree_root: B256::ZERO,
+            }],
+            bytecodes: vec![],
+        }
+    }
+
+    #[test]
+    fn stream_ab_read_spam_5k() {
+        assert_ab_streaming_matches(&read_spam_batch(5_000));
+    }
+
+    #[test]
+    fn stream_ab_read_spam_20k() {
+        assert_ab_streaming_matches(&read_spam_batch(20_000));
+    }
+
+    /// Heavier scale, kept out of the default run for speed; enable with
+    /// `--ignored`. Confirms A/B equality holds at 50k slots.
+    #[test]
+    #[ignore = "heavy: 50k proofs; run explicitly for the scale check"]
+    fn stream_ab_read_spam_50k() {
+        assert_ab_streaming_matches(&read_spam_batch(50_000));
+    }
 }

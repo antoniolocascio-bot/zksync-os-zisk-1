@@ -11,7 +11,7 @@ use revm::primitives::{Address, B256, Bytes, U256, KECCAK_EMPTY};
 use revm::state::{AccountInfo, Bytecode};
 use revm::DatabaseRef;
 
-use crate::merkle;
+use crate::merkle::{self, StorageProof};
 use crate::types::*;
 
 /// Database that verifies every read against a merkle proof.
@@ -29,6 +29,48 @@ pub(super) struct ProvenDB {
     bytecodes: HashMap<B256, Bytecode>,
     /// Block hashes for BLOCKHASH opcode (verified against batch_meta).
     block_hashes: HashMap<u64, B256>,
+}
+
+impl ProvenDB {
+    /// Assemble a `ProvenDB` from its already-verified component maps. Both the
+    /// batch-collecting builder (`build_proven_db`) and the streaming builder
+    /// (`super::stream`) funnel through here, so the two paths produce a
+    /// byte-identical database.
+    pub(super) fn from_parts(
+        verified_storage: HashMap<B256, Option<B256>>,
+        verified_accounts: HashMap<Address, Option<AccountInfo>>,
+        bytecodes: HashMap<B256, Bytecode>,
+        block_hashes: HashMap<u64, B256>,
+    ) -> Self {
+        ProvenDB {
+            verified_storage,
+            verified_accounts,
+            bytecodes,
+            block_hashes,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ProvenDB {
+    /// Borrow all four component maps for A/B equality checks between the
+    /// collecting and streaming builders.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn parts_for_test(
+        &self,
+    ) -> (
+        &HashMap<B256, Option<B256>>,
+        &HashMap<Address, Option<AccountInfo>>,
+        &HashMap<B256, Bytecode>,
+        &HashMap<u64, B256>,
+    ) {
+        (
+            &self.verified_storage,
+            &self.verified_accounts,
+            &self.bytecodes,
+            &self.block_hashes,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -102,64 +144,76 @@ impl DatabaseRef for ProvenDB {
     }
 }
 
-/// Build a ProvenDB for the entire batch.
-/// All merkle proofs from all blocks are verified at construction time and
-/// their values are stored in flat maps. Each block's proofs are verified
-/// against that block's expected tree root.
-pub(super) fn build_proven_db(input: &BatchInput) -> ProvenDB {
-    let meta = &input.batch_meta;
-    let mut verified_storage: HashMap<B256, Option<B256>> = HashMap::new();
-    let mut verified_accounts: HashMap<Address, Option<AccountInfo>> = HashMap::new();
-    let mut bytecodes: HashMap<B256, Bytecode> = HashMap::new();
-    let mut block_hashes: HashMap<u64, B256> = HashMap::new();
+// ---------------------------------------------------------------------------
+// Shared construction helpers.
+//
+// The verified-account, bytecode, block-hash, and per-proof verification logic
+// is factored out so the batch-collecting `build_proven_db` and the streaming
+// builder (`super::stream`, FIX A) share EXACTLY the same code. Only *how the
+// storage proofs are fed in* differs between the two paths (all-resident vs.
+// verify-and-drop); everything downstream is identical, which is what makes the
+// two paths produce a byte-identical `ProvenDB`.
+// ---------------------------------------------------------------------------
 
-    // Load batch-level bytecodes. All are keyed by keccak256(code).
-    // The server converts blake2s-keyed force-deploy bytecodes to keccak256
-    // at witness-building time.
-    for (hash, code) in &input.bytecodes {
+/// The pre-state tree root a block's storage proofs must recover: the
+/// per-block `expected_tree_root` when set, else the batch pre-state root.
+pub(super) fn expected_root_for_block<'a>(
+    block: &'a BlockInput,
+    meta: &'a BatchMeta,
+) -> &'a B256 {
+    if !block.expected_tree_root.is_zero() {
+        &block.expected_tree_root
+    } else {
+        &meta.tree_root_before
+    }
+}
+
+/// Verify one storage proof, returning the recovered root and the proven value
+/// (`None` = proven non-existent). Panics with the original message on a
+/// malformed proof — identical to the inline check in the pre-refactor code.
+pub(super) fn verify_storage_proof(key: &B256, proof: &StorageProof) -> (B256, Option<B256>) {
+    proof
+        .verify(key)
+        .unwrap_or_else(|e| panic!("merkle proof failed for key {key}: {e}"))
+}
+
+/// Load batch-level bytecodes. All are keyed by keccak256(code). The server
+/// converts blake2s-keyed force-deploy bytecodes to keccak256 at
+/// witness-building time.
+pub(super) fn load_bytecodes(bytecodes: &[(B256, Vec<u8>)]) -> HashMap<B256, Bytecode> {
+    let mut out: HashMap<B256, Bytecode> = HashMap::new();
+    for (hash, code) in bytecodes {
         let computed = crate::hash::keccak256(code);
         assert_eq!(
             computed, *hash,
-            "bytecode hash mismatch: key={hash}, keccak256={computed}, len={}", code.len()
+            "bytecode hash mismatch: key={hash}, keccak256={computed}, len={}",
+            code.len()
         );
-        bytecodes.insert(*hash, Bytecode::new_raw(Bytes::copy_from_slice(code)));
+        out.insert(*hash, Bytecode::new_raw(Bytes::copy_from_slice(code)));
     }
+    out
+}
 
-    for block in &input.blocks {
-        let expected_root = if !block.expected_tree_root.is_zero() {
-            &block.expected_tree_root
-        } else {
-            &meta.tree_root_before
-        };
+/// Build the verified-account map from the blocks' account preimages, resolving
+/// each against the already-verified storage values and bytecodes. First block
+/// to name an account wins (matching the pre-refactor loop).
+pub(super) fn build_verified_accounts(
+    blocks: &[BlockInput],
+    verified_storage: &HashMap<B256, Option<B256>>,
+    bytecodes: &HashMap<B256, Bytecode>,
+) -> HashMap<Address, Option<AccountInfo>> {
+    let mut verified_accounts: HashMap<Address, Option<AccountInfo>> = HashMap::new();
 
-        // Verify all merkle proofs and extract values FROM the proofs.
-        for (key, proof) in &block.storage_proofs {
-            let (root, value) = proof
-                .verify(key)
-                .unwrap_or_else(|e| panic!("merkle proof failed for key {key}: {e}"));
-
-            assert_eq!(
-                root, *expected_root,
-                "proof for {key} recovers root {root}, expected {expected_root}"
-            );
-
-            // First block's proof wins — later blocks may have the same key
-            // against a different root (after writes), but the pre-state value
-            // is what matters for the ProvenDB. Intra-batch updates go through CacheDB.
-            verified_storage.entry(*key).or_insert(value);
-        }
-
-        // Build verified accounts from account_preimages.
-        // Each preimage is verified against the merkle proof in verified_storage.
+    for block in blocks {
         for (addr, preimage) in &block.account_preimages {
-            if verified_accounts.contains_key(addr) { continue; }
+            if verified_accounts.contains_key(addr) {
+                continue;
+            }
             let addr_bytes: [u8; 20] = addr.into_array();
             let flat_key = merkle::derive_account_properties_key(&addr_bytes);
 
             let proven_value = verified_storage.get(&flat_key).unwrap_or_else(|| {
-                panic!(
-                    "account_preimage for {addr} but no storage proof at flat_key={flat_key}"
-                )
+                panic!("account_preimage for {addr} but no storage proof at flat_key={flat_key}")
             });
 
             match proven_value {
@@ -186,17 +240,30 @@ pub(super) fn build_proven_db(input: &BatchInput) -> ProvenDB {
                     };
                     let code = bytecodes.get(&code_hash).cloned();
 
-                    verified_accounts.insert(*addr, Some(AccountInfo {
-                        nonce: props.nonce,
-                        balance: U256::from_be_bytes(props.balance),
-                        code_hash,
-                        code,
-                        account_id: None,
-                    }));
+                    verified_accounts.insert(
+                        *addr,
+                        Some(AccountInfo {
+                            nonce: props.nonce,
+                            balance: U256::from_be_bytes(props.balance),
+                            code_hash,
+                            code,
+                            account_id: None,
+                        }),
+                    );
                 }
             }
         }
+    }
 
+    verified_accounts
+}
+
+/// Build the BLOCKHASH ring from the blocks' witnessed hashes, cross-checking
+/// against `batch_meta.previous_block_hashes` exactly as the pre-refactor loop.
+pub(super) fn build_block_hashes(blocks: &[BlockInput], meta: &BatchMeta) -> HashMap<u64, B256> {
+    let mut block_hashes: HashMap<u64, B256> = HashMap::new();
+
+    for block in blocks {
         // Verify block hashes against batch_meta.previous_block_hashes.
         //
         // previous_block_hashes is the 255-entry ring preceding the LAST block
@@ -204,7 +271,7 @@ pub(super) fn build_proven_db(input: &BatchInput) -> ProvenDB {
         // block (last_block - 255 + j). We use the last block's number, not
         // `block_number_before` (which is first_block - 1), so multi-block
         // batches index into the ring correctly.
-        if let Some(last_block) = input.blocks.last() {
+        if let Some(last_block) = blocks.last() {
             let last_num = last_block.number;
             if last_num >= 255 {
                 let oldest_available = last_num - 255;
@@ -233,13 +300,45 @@ pub(super) fn build_proven_db(input: &BatchInput) -> ProvenDB {
                 block_hashes.insert(num, hash);
             }
         }
-
     }
 
-    ProvenDB {
-        verified_storage,
-        verified_accounts,
-        bytecodes,
-        block_hashes,
+    block_hashes
+}
+
+/// Build a ProvenDB for the entire batch (batch-collecting path).
+///
+/// All merkle proofs from all blocks are verified at construction time and
+/// their values are stored in flat maps. Each block's proofs are verified
+/// against that block's expected tree root. This path holds every proof (and
+/// therefore every merkle sibling) resident at once; the streaming path in
+/// `super::stream` (FIX A) verifies and drops each proof instead, but reuses
+/// the same helpers below so the resulting `ProvenDB` is byte-identical.
+pub(super) fn build_proven_db(input: &BatchInput) -> ProvenDB {
+    let meta = &input.batch_meta;
+
+    let bytecodes = load_bytecodes(&input.bytecodes);
+
+    let mut verified_storage: HashMap<B256, Option<B256>> = HashMap::new();
+    for block in &input.blocks {
+        let expected_root = expected_root_for_block(block, meta);
+
+        // Verify all merkle proofs and extract values FROM the proofs.
+        for (key, proof) in &block.storage_proofs {
+            let (root, value) = verify_storage_proof(key, proof);
+            assert_eq!(
+                root, *expected_root,
+                "proof for {key} recovers root {root}, expected {expected_root}"
+            );
+
+            // First block's proof wins — later blocks may have the same key
+            // against a different root (after writes), but the pre-state value
+            // is what matters for the ProvenDB. Intra-batch updates go through CacheDB.
+            verified_storage.entry(*key).or_insert(value);
+        }
     }
+
+    let verified_accounts = build_verified_accounts(&input.blocks, &verified_storage, &bytecodes);
+    let block_hashes = build_block_hashes(&input.blocks, meta);
+
+    ProvenDB::from_parts(verified_storage, verified_accounts, bytecodes, block_hashes)
 }

@@ -217,26 +217,41 @@ impl BatchTreeUpdate {
     /// Verify the old root matches `expected_old_root`, apply writes, and return
     /// (new_root_hash, new_leaf_count).
     ///
-    /// Soundness: pass 1 reconstructs the old root from `sorted_leaves` +
-    /// `intermediate_hashes`, recording every node it consumes or computes into
-    /// an authenticated (depth, index) -> hash map. Pass 2 computes the new
-    /// root over the post-write leaf set, resolving every off-path sibling
-    /// from that map or from empty-subtree constants (positions at or beyond
-    /// `leaf_count_before` hold no pre-existing leaves; inserted leaves are
-    /// dense, so anything not in the computed set there is empty). Any sibling
-    /// that is neither authenticated nor provably empty is a hard error — the
-    /// witness must carry an anchor leaf for that region.
+    /// FIX B (guest memory): a SINGLE bottom-up walk computes the old and new
+    /// roots together, carrying an `(old_hash, new_hash)` pair per touched
+    /// position and consuming `intermediate_hashes` for off-path siblings
+    /// (which are untouched subtrees, hence identical in the old and new trees).
+    /// Interior levels are released as the walk ascends, so the working set is
+    /// `O(W)` (touched nodes at one level) rather than the previous
+    /// `O(W·depth)` `authenticated` HashMap — the write-spam OOM dominator.
+    ///
+    /// Soundness is preserved bit-for-bit (see the reference two-pass under
+    /// `#[cfg(test)]` and the extensive A/B regression tests): the off-path
+    /// sibling of every position is resolved by the SAME region rule the
+    /// previous `resolve_sibling` used — a sibling subtree that begins at or
+    /// beyond `leaf_count_before` is a provably-empty subtree (the old tree is
+    /// empty there and inserts are dense, so an off-path node there holds
+    /// nothing), and anything below `leaf_count_before` must be supplied by an
+    /// `intermediate_hashes` entry (an anchor). Inserted leaves carry
+    /// `old = empty_subtree_hash(0)` and ascend as empty subtrees until they
+    /// merge with an authenticated old node, reproducing the previous code's
+    /// empty-right-sibling behaviour at the tree's populated boundary. A witness
+    /// missing an anchor makes the old root mismatch (or exhausts the
+    /// intermediate hashes) — a hard failure, exactly as before.
     pub fn apply(&self, expected_old_root: &B256) -> (B256, u64) {
-        // Pass 1: verify the old root, authenticating node hashes.
-        let mut authenticated: std::collections::HashMap<(u8, u64), B256> =
-            std::collections::HashMap::new();
-        let old_root =
-            self.zip_and_record(&self.sorted_leaves, self.leaf_count_before, &mut authenticated);
+        let (new_leaves, next_tree_index) = self.apply_writes();
+        let (old_root, new_root) = self.walk_old_and_new(&new_leaves);
         assert_eq!(
             old_root, *expected_old_root,
             "batch tree update: old root mismatch: computed {old_root}, expected {expected_old_root}"
         );
+        (new_root, next_tree_index)
+    }
 
+    /// Apply the write operations to a clone of `sorted_leaves`, returning the
+    /// post-write leaf set (sorted by index) and the new leaf count. This is the
+    /// unchanged write-application logic; only the root computation changed.
+    fn apply_writes(&self) -> (Vec<(u64, TreeLeaf)>, u64) {
         let mut leaves: Vec<(u64, TreeLeaf)> = self.sorted_leaves.clone();
         let mut next_tree_index = self.leaf_count_before;
 
@@ -297,7 +312,127 @@ impl BatchTreeUpdate {
         }
 
         leaves.sort_by_key(|(idx, _)| *idx);
-        // Pass 2: independent new-root computation from authenticated data only.
+        (leaves, next_tree_index)
+    }
+
+    /// FIX B core: one bottom-up pass over the union of the old and new touched
+    /// positions, carrying `(old_hash, new_hash)` per node. Returns
+    /// `(old_root, new_root)`.
+    ///
+    /// The combined depth-0 list is built from `new_leaves` (sorted by index).
+    /// Each entry's `new_hash` is the post-write leaf hash; its `old_hash` is
+    /// the pre-write leaf hash (from `sorted_leaves`) for a pre-existing index,
+    /// or `empty_subtree_hash(0)` for an inserted index (which was empty in the
+    /// old tree). Off-path siblings are resolved by `resolve_offpath_sibling`
+    /// and are, by construction, identical in the old and new trees, so a single
+    /// value serves both sides. `intermediate_hashes` is consumed in traversal
+    /// order (and must be fully consumed) — matching the previous pass-1 order.
+    fn walk_old_and_new(&self, new_leaves: &[(u64, TreeLeaf)]) -> (B256, B256) {
+        let empty = empty_subtree_hashes();
+        let mut hashes_iter = self.intermediate_hashes.iter();
+
+        // Pre-write leaf by index, for the old-side depth-0 hashes. Only
+        // pre-existing indices (< leaf_count_before) are looked up here.
+        let orig_by_idx: std::collections::HashMap<u64, &TreeLeaf> =
+            self.sorted_leaves.iter().map(|(idx, l)| (*idx, l)).collect();
+
+        // Depth-0 combined nodes: (index, old_hash, new_hash), sorted by index.
+        let mut level: Vec<(u64, B256, B256)> = new_leaves
+            .iter()
+            .map(|(idx, new_leaf)| {
+                let new_hash = hash_leaf(&new_leaf.key, &new_leaf.value, new_leaf.next_index);
+                let old_hash = if *idx < self.leaf_count_before {
+                    let o = orig_by_idx
+                        .get(idx)
+                        .expect("pre-existing touched leaf must be present in sorted_leaves");
+                    hash_leaf(&o.key, &o.value, o.next_index)
+                } else {
+                    // Inserted index: the old tree held an empty leaf here.
+                    empty[0]
+                };
+                (*idx, old_hash, new_hash)
+            })
+            .collect();
+
+        for depth in 0..TREE_DEPTH {
+            let mut i = 0;
+            let mut next: Vec<(u64, B256, B256)> = Vec::with_capacity(level.len().div_ceil(2) + 1);
+            while i < level.len() {
+                let (idx, old, new) = level[i];
+                let (parent_old, parent_new) = if idx % 2 == 1 {
+                    // Odd (right child): left sibling is off-path. Its left
+                    // neighbour, if computed, would have paired with it while
+                    // that even node was processed, so reaching an odd node
+                    // standalone means the left sibling is genuinely off-path.
+                    let sib = self.resolve_offpath_sibling(depth, idx - 1, empty, &mut hashes_iter);
+                    i += 1;
+                    (blake2s_compress(&sib, &old), blake2s_compress(&sib, &new))
+                } else if level.get(i + 1).is_some_and(|(nidx, _, _)| *nidx == idx + 1) {
+                    // Even (left child) with the computed right sibling present.
+                    let (_, rold, rnew) = level[i + 1];
+                    i += 2;
+                    (blake2s_compress(&old, &rold), blake2s_compress(&new, &rnew))
+                } else {
+                    // Even (left child) with off-path right sibling.
+                    let sib = self.resolve_offpath_sibling(depth, idx + 1, empty, &mut hashes_iter);
+                    i += 1;
+                    (blake2s_compress(&old, &sib), blake2s_compress(&new, &sib))
+                };
+                next.push((idx / 2, parent_old, parent_new));
+            }
+            level = next;
+        }
+
+        assert!(
+            hashes_iter.next().is_none(),
+            "not all intermediate hashes consumed"
+        );
+        debug_assert_eq!(level.len(), 1, "walk did not reduce to a single root");
+        (level[0].1, level[0].2)
+    }
+
+    /// Resolve an off-path sibling (identical for the old and new trees).
+    ///
+    /// A sibling subtree that begins at or beyond `leaf_count_before` is
+    /// provably empty — the old tree is empty there and any inserted leaf in
+    /// that region would be a computed node (hence paired, not off-path). This
+    /// is exactly the empty rule of the previous `resolve_sibling`, and it also
+    /// reproduces the previous pass-1 "rightmost node uses empty" behaviour.
+    /// Otherwise the sibling is an untouched old subtree supplied as the next
+    /// `intermediate_hashes` entry (an anchor); running out is a hard failure.
+    fn resolve_offpath_sibling(
+        &self,
+        depth: u8,
+        sib_idx: u64,
+        empty: &[B256],
+        hashes_iter: &mut std::slice::Iter<'_, B256>,
+    ) -> B256 {
+        let subtree_start = sib_idx << depth;
+        if subtree_start >= self.leaf_count_before {
+            empty[depth as usize]
+        } else {
+            *hashes_iter.next().expect("ran out of intermediate hashes")
+        }
+    }
+
+    /// Reference two-pass implementation, retained as the A/B test oracle.
+    ///
+    /// This is the pre-FIX-B `apply`: pass 1 reconstructs the old root while
+    /// recording every node into an `authenticated` map (`O(W·depth)`), then
+    /// pass 2 recomputes the new root from that map. The streaming `apply` above
+    /// must reproduce its `(new_root, new_leaf_count)` bit-for-bit.
+    #[cfg(test)]
+    pub(crate) fn apply_reference(&self, expected_old_root: &B256) -> (B256, u64) {
+        let mut authenticated: std::collections::HashMap<(u8, u64), B256> =
+            std::collections::HashMap::new();
+        let old_root =
+            self.zip_and_record(&self.sorted_leaves, self.leaf_count_before, &mut authenticated);
+        assert_eq!(
+            old_root, *expected_old_root,
+            "batch tree update: old root mismatch: computed {old_root}, expected {expected_old_root}"
+        );
+
+        let (leaves, next_tree_index) = self.apply_writes();
         let new_root = self.zip_from_authenticated(&leaves, next_tree_index, &authenticated);
         (new_root, next_tree_index)
     }
@@ -306,6 +441,7 @@ impl BatchTreeUpdate {
     /// `intermediate_hashes` in traversal order and recording every node this
     /// pass touches (leaf hashes, consumed siblings, computed internal nodes)
     /// into `authenticated`, keyed by (depth, index-at-depth).
+    #[cfg(test)]
     fn zip_and_record(
         &self,
         sorted_leaves: &[(u64, TreeLeaf)],
@@ -377,6 +513,7 @@ impl BatchTreeUpdate {
     /// at `leaf_count_before`, so a sibling subtree that starts at or beyond
     /// `leaf_count_before` and contains no computed node holds no leaves at
     /// all in the new tree.
+    #[cfg(test)]
     fn zip_from_authenticated(
         &self,
         sorted_leaves: &[(u64, TreeLeaf)],
@@ -434,6 +571,7 @@ impl BatchTreeUpdate {
     }
 
     /// Resolve an off-path sibling for the new-root pass.
+    #[cfg(test)]
     fn resolve_sibling(
         depth: u8,
         sibling_idx: u64,
@@ -764,5 +902,309 @@ mod tests {
         };
         let result = std::panic::catch_unwind(|| update.apply(&old_root));
         assert!(result.is_err(), "mis-bracketed insert must be rejected");
+    }
+
+    // =================== FIX B: streaming tree-update A/B ===================
+    //
+    // The streaming `apply` must reproduce the reference two-pass `apply_reference`
+    // AND an independent dense-root oracle, bit-for-bit, across updates, inserts,
+    // and mixes, at many depths — with dense witnesses (no intermediate hashes)
+    // and with sparse witnesses (real intermediate hashes exercising the
+    // off-path-sibling consumption path).
+
+    /// B256 whose low 8 bytes hold `x` big-endian (so ordering matches `x`, and
+    /// all keys stay strictly between the MIN(0) and MAX(0xff..) guards).
+    fn key_of(x: u64) -> B256 {
+        let mut b = [0u8; 32];
+        b[24..32].copy_from_slice(&x.to_be_bytes());
+        B256::from(b)
+    }
+
+    /// Dense old tree: MIN/MAX guards + `l` data leaves, keys `(i+1)*1_000_000`
+    /// (1e6 gaps leave room for inserts). Returns (leaves by index, leaf_count,
+    /// old_root).
+    fn build_old_dense(l: u64) -> (Vec<(u64, TreeLeaf)>, u64, B256) {
+        let mut leaves: Vec<(u64, TreeLeaf)> = Vec::new();
+        leaves.push((
+            0,
+            TreeLeaf { key: B256::ZERO, value: B256::ZERO, next_index: if l > 0 { 2 } else { 1 } },
+        ));
+        leaves.push((
+            1,
+            TreeLeaf { key: B256::repeat_byte(0xff), value: B256::ZERO, next_index: 1 },
+        ));
+        for i in 0..l {
+            let idx = 2 + i;
+            let next = if i + 1 < l { 2 + i + 1 } else { 1 };
+            leaves.push((
+                idx,
+                TreeLeaf { key: key_of((i + 1) * 1_000_000), value: key_of(1000 + i), next_index: next },
+            ));
+        }
+        let leaf_count = l + 2;
+        let root = dense_root(&leaves, leaf_count);
+        (leaves, leaf_count, root)
+    }
+
+    /// Dense full internal-node levels (level 0 = leaf hashes over a contiguous
+    /// 0..leaf_count index space), for emitting sparse-witness siblings.
+    fn full_levels(leaves: &[(u64, TreeLeaf)], leaf_count: u64) -> Vec<Vec<B256>> {
+        let empty = empty_subtree_hashes_vec();
+        let mut lvl0 = vec![B256::ZERO; leaf_count as usize];
+        for (i, l) in leaves {
+            lvl0[*i as usize] = hash_leaf(&l.key, &l.value, l.next_index);
+        }
+        let mut levels = vec![lvl0];
+        while levels.last().unwrap().len() > 1 {
+            let d = levels.len() - 1;
+            let cur = levels.last().unwrap();
+            let up: Vec<B256> = (0..cur.len().div_ceil(2))
+                .map(|i| {
+                    let l = cur[2 * i];
+                    let r = cur.get(2 * i + 1).copied().unwrap_or(empty[d]);
+                    blake2s_compress(&l, &r)
+                })
+                .collect();
+            levels.push(up);
+        }
+        levels
+    }
+
+    /// Emit the off-path sibling hashes for a sparse witness over `touched`
+    /// (sorted ascending touched indices), in the exact traversal order the old
+    /// root reconstruction consumes them. Mirrors `zip_and_record`'s decisions.
+    fn sparse_intermediates(
+        levels: &[Vec<B256>],
+        touched: &[u64],
+        leaf_count: u64,
+    ) -> Vec<B256> {
+        let mut out = Vec::new();
+        let mut nodes: Vec<u64> = touched.to_vec();
+        let mut last_idx = leaf_count - 1;
+        for depth in 0..TREE_DEPTH as usize {
+            let mut i = 0;
+            let mut next = Vec::new();
+            while i < nodes.len() {
+                let cur = nodes[i];
+                if cur % 2 == 1 {
+                    i += 1;
+                    out.push(levels[depth][(cur - 1) as usize]);
+                } else if i + 1 < nodes.len() && nodes[i + 1] == cur + 1 {
+                    i += 2;
+                } else {
+                    i += 1;
+                    if cur != last_idx {
+                        out.push(levels[depth][(cur + 1) as usize]);
+                    }
+                }
+                next.push(cur / 2);
+            }
+            nodes = next;
+            last_idx /= 2;
+        }
+        out
+    }
+
+    /// Assert `apply == apply_reference == dense oracle` for a dense witness
+    /// (all leaves present, no intermediate hashes) with `update_stride` updates
+    /// and `insert_stride` inserts over an `l`-leaf tree. Update targets and
+    /// insert predecessors are disjoint so the independent oracle is simple.
+    fn ab_dense_case(l: u64, update_stride: u64, insert_stride: u64) {
+        let (old_leaves, leaf_count, root) = build_old_dense(l);
+
+        let mut expected = old_leaves.clone();
+        let mut pos: std::collections::HashMap<u64, usize> =
+            expected.iter().enumerate().map(|(p, (i, _))| (*i, p)).collect();
+
+        let mut operations = Vec::new();
+        let mut entries = Vec::new();
+        let mut updated: std::collections::HashSet<u64> = Default::default();
+
+        if update_stride > 0 {
+            let mut i = 0;
+            while i < l {
+                let idx = 2 + i;
+                let new_val = key_of(9_000_000 + i);
+                operations.push(WriteOp::Update { index: idx });
+                entries.push((old_leaves[idx as usize].1.key, new_val));
+                expected[pos[&idx]].1.value = new_val;
+                updated.insert(idx);
+                i += update_stride;
+            }
+        }
+
+        let mut next_index = leaf_count;
+        if insert_stride > 0 && l > 0 {
+            let mut i = 0;
+            while i < l {
+                let pred_idx = 2 + i;
+                if !updated.contains(&pred_idx) {
+                    let new_key = key_of((i + 1) * 1_000_000 + 500_000);
+                    let new_val = key_of(8_000_000 + i);
+                    let this_index = next_index;
+                    next_index += 1;
+                    operations.push(WriteOp::Insert { prev_index: pred_idx });
+                    entries.push((new_key, new_val));
+                    let old_next = expected[pos[&pred_idx]].1.next_index;
+                    expected[pos[&pred_idx]].1.next_index = this_index;
+                    let new_pos = expected.len();
+                    expected.push((this_index, TreeLeaf { key: new_key, value: new_val, next_index: old_next }));
+                    pos.insert(this_index, new_pos);
+                }
+                i += insert_stride;
+            }
+        }
+
+        let update = BatchTreeUpdate {
+            operations,
+            entries,
+            sorted_leaves: old_leaves.clone(),
+            intermediate_hashes: vec![],
+            leaf_count_before: leaf_count,
+        };
+
+        let (r_new, c_new) = update.apply(&root);
+        let (r_ref, c_ref) = update.apply_reference(&root);
+        assert_eq!(r_new, r_ref, "dense apply vs reference root (l={l})");
+        assert_eq!(c_new, c_ref, "dense apply vs reference count (l={l})");
+
+        expected.sort_by_key(|(i, _)| *i);
+        let oracle = dense_root(&expected, next_index);
+        assert_eq!(r_new, oracle, "dense apply vs oracle root (l={l})");
+        assert_eq!(c_new, next_index, "dense apply count (l={l})");
+    }
+
+    #[test]
+    fn ab_dense_updates_inserts_mixed() {
+        // (l, update_stride, insert_stride) across many shapes/depths.
+        ab_dense_case(0, 0, 0); // empty tree, no ops
+        ab_dense_case(1, 1, 0); // single update
+        ab_dense_case(1, 0, 1); // single insert
+        ab_dense_case(3, 1, 0); // all updates
+        ab_dense_case(3, 0, 1); // all inserts
+        ab_dense_case(7, 2, 3); // mixed
+        ab_dense_case(15, 3, 4); // mixed, depth ~4
+        ab_dense_case(31, 5, 7); // mixed, depth ~5
+        ab_dense_case(100, 7, 11); // mixed, depth ~7
+        ab_dense_case(500, 0, 13); // insert-heavy, depth ~9
+        ab_dense_case(1000, 50, 97); // mixed, depth ~10
+    }
+
+    /// Sparse update-only witnesses: only the updated leaves are in
+    /// `sorted_leaves`, and `intermediate_hashes` carries the off-path siblings.
+    /// This exercises the streaming `apply`'s intermediate-consumption path and
+    /// compares it against the reference two-pass and the dense oracle.
+    fn ab_sparse_updates_case(l: u64, stride: u64) {
+        let (old_leaves, leaf_count, root) = build_old_dense(l);
+        let levels = full_levels(&old_leaves, leaf_count);
+
+        // Touched (updated) data leaves.
+        let mut touched: Vec<u64> = Vec::new();
+        let mut i = 0;
+        while i < l {
+            touched.push(2 + i);
+            i += stride.max(1);
+        }
+        touched.sort_unstable();
+
+        let sorted_leaves: Vec<(u64, TreeLeaf)> = touched
+            .iter()
+            .map(|&idx| (idx, old_leaves[idx as usize].1.clone()))
+            .collect();
+        let intermediate_hashes = sparse_intermediates(&levels, &touched, leaf_count);
+
+        let mut operations = Vec::new();
+        let mut entries = Vec::new();
+        let mut expected = old_leaves.clone();
+        for (n, &idx) in touched.iter().enumerate() {
+            let new_val = key_of(7_000_000 + n as u64);
+            operations.push(WriteOp::Update { index: idx });
+            entries.push((old_leaves[idx as usize].1.key, new_val));
+            expected[idx as usize].1.value = new_val;
+        }
+
+        let update = BatchTreeUpdate {
+            operations,
+            entries,
+            sorted_leaves,
+            intermediate_hashes,
+            leaf_count_before: leaf_count,
+        };
+
+        let (r_new, c_new) = update.apply(&root);
+        let (r_ref, c_ref) = update.apply_reference(&root);
+        assert_eq!(r_new, r_ref, "sparse apply vs reference root (l={l})");
+        assert_eq!(c_new, c_ref, "sparse apply vs reference count (l={l})");
+
+        let oracle = dense_root(&expected, leaf_count);
+        assert_eq!(r_new, oracle, "sparse apply vs oracle root (l={l})");
+        assert_eq!(c_new, leaf_count, "sparse apply count (l={l})");
+    }
+
+    #[test]
+    fn ab_sparse_update_only_intermediate_hashes() {
+        ab_sparse_updates_case(3, 1);
+        ab_sparse_updates_case(7, 2);
+        ab_sparse_updates_case(15, 3);
+        ab_sparse_updates_case(31, 4);
+        ab_sparse_updates_case(100, 9);
+        ab_sparse_updates_case(255, 17);
+        ab_sparse_updates_case(1000, 137);
+    }
+
+    /// A/B the two hand-built sparse-INSERT witnesses (with anchors + real
+    /// intermediate hashes) against the reference two-pass.
+    #[test]
+    fn ab_sparse_inserts_against_reference() {
+        let h = |l: &TreeLeaf| hash_leaf(&l.key, &l.value, l.next_index);
+
+        // Case 1: single insert with an anchor leaf (from
+        // `apply_insert_without_trusted_root_is_correct`).
+        {
+            let leaf0 = TreeLeaf { key: B256::ZERO, value: B256::ZERO, next_index: 2 };
+            let leaf1 = TreeLeaf { key: B256::repeat_byte(0xff), value: B256::ZERO, next_index: 1 };
+            let leaf2 = TreeLeaf { key: B256::repeat_byte(0x20), value: B256::repeat_byte(0xa2), next_index: 3 };
+            let leaf3 = TreeLeaf { key: B256::repeat_byte(0x30), value: B256::repeat_byte(0xa3), next_index: 4 };
+            let leaf4 = TreeLeaf { key: B256::repeat_byte(0x40), value: B256::repeat_byte(0xa4), next_index: 1 };
+            let old_leaves = vec![
+                (0u64, leaf0.clone()),
+                (1u64, leaf1.clone()),
+                (2u64, leaf2.clone()),
+                (3u64, leaf3.clone()),
+                (4u64, leaf4.clone()),
+            ];
+            let old_root = dense_root(&old_leaves, 5);
+            let update = BatchTreeUpdate {
+                operations: vec![WriteOp::Insert { prev_index: 0 }],
+                entries: vec![(B256::repeat_byte(0x10), B256::repeat_byte(0xb5))],
+                sorted_leaves: vec![(0, leaf0), (2, leaf2), (4, leaf4)],
+                intermediate_hashes: vec![h(&leaf1), h(&leaf3)],
+                leaf_count_before: 5,
+            };
+            assert_eq!(update.apply(&old_root), update.apply_reference(&old_root));
+        }
+
+        // Case 2: two chained inserts (from `apply_chained_inserts_is_correct`).
+        {
+            let leaf0 = TreeLeaf { key: B256::ZERO, value: B256::ZERO, next_index: 2 };
+            let leaf1 = TreeLeaf { key: B256::repeat_byte(0xff), value: B256::ZERO, next_index: 1 };
+            let leaf2 = TreeLeaf { key: B256::repeat_byte(0x40), value: B256::repeat_byte(0xa2), next_index: 1 };
+            let old_leaves = vec![(0u64, leaf0.clone()), (1u64, leaf1.clone()), (2u64, leaf2.clone())];
+            let old_root = dense_root(&old_leaves, 3);
+            let update = BatchTreeUpdate {
+                operations: vec![
+                    WriteOp::Insert { prev_index: 0 },
+                    WriteOp::Insert { prev_index: 3 },
+                ],
+                entries: vec![
+                    (B256::repeat_byte(0x10), B256::repeat_byte(0xb3)),
+                    (B256::repeat_byte(0x20), B256::repeat_byte(0xb4)),
+                ],
+                sorted_leaves: vec![(0, leaf0), (2, leaf2)],
+                intermediate_hashes: vec![h(&leaf1)],
+                leaf_count_before: 3,
+            };
+            assert_eq!(update.apply(&old_root), update.apply_reference(&old_root));
+        }
     }
 }

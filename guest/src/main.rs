@@ -16,7 +16,7 @@ ziskos::entrypoint!(main);
 
 #[cfg(not(test))]
 fn main() {
-    use zksync_os_zisk_lib::{crypto::CustomEvmCrypto, executor, types::BatchInput};
+    use zksync_os_zisk_lib::{crypto::CustomEvmCrypto, executor};
 
     // Install ZiSK-native crypto (keccak, secp256k1, bn254, etc.)
     // before any REVM execution. On the ZiSK target this uses hardware-
@@ -33,12 +33,17 @@ fn main() {
 
     // The wire format is bincode 1.x (fixint), but `ziskos::io::read()`
     // deserializes with bincode 2.x (varint). Read the raw framed slice
-    // (zero-copy on the zkVM target) and deserialize with bincode 1.x.
+    // (zero-copy on the zkVM target) and parse with bincode 1.x.
+    //
+    // FIX A (guest memory): instead of `bincode::deserialize::<BatchInput>`
+    // (which materialises EVERY merkle sibling on the 507.75 MiB heap before
+    // verification — the read-spam OOM floor), stream the storage proofs: each
+    // is verified against the pre-state root and dropped before the next is
+    // read, so the siblings are never all resident. The wire format is
+    // unchanged and the commitment is byte-identical. See `executor::stream`.
     let bytes = ziskos::io::read_input_slice();
-    let batch_input: BatchInput =
-        bincode::deserialize(bytes).expect("failed to deserialize BatchInput (bincode 1.x)");
-
-    let (_output, commitment) = executor::execute_and_commit(&batch_input);
+    let (_output, commitment) = executor::execute_and_commit_streaming(bytes)
+        .expect("failed to deserialize/execute BatchInput (streaming, bincode 1.x)");
     let hash_bytes: [u8; 32] = commitment.into();
 
     // `commit_slice` writes the byte stream directly (no u32-LE re-chunking),

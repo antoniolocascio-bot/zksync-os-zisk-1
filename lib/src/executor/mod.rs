@@ -6,6 +6,7 @@
 
 mod evm;
 mod proven_db;
+mod stream;
 pub mod tx;
 mod verify;
 
@@ -32,6 +33,17 @@ pub fn execute_and_commit_debug(input: &BatchInput) -> (BatchOutput, B256, B256,
 }
 
 fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B256, B256) {
+    let spec_id = resolve_spec_and_validate(input);
+    // Build the proof-verified DB by collecting every proof at once (this holds
+    // all merkle siblings resident). The streaming entry point below builds the
+    // same DB proof-by-proof; both share the execution/commitment core.
+    let proven_db = proven_db::build_proven_db(input);
+    run_execution_and_commit(input, spec_id, proven_db)
+}
+
+/// Assert the wire-format version, resolve the spec id, and validate the block
+/// sequence. Shared by the collecting and streaming entry points.
+fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
     assert_eq!(
         input.version,
         crate::types::BATCH_INPUT_VERSION,
@@ -45,12 +57,25 @@ fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B25
         2 => ZkSpecId::AtlasV3,
         _ => panic!("unknown spec_id: {}", input.spec_id),
     };
-
-    let meta = &input.batch_meta;
     validate_block_sequence(input);
+    spec_id
+}
 
-    // Execute all blocks with merkle-verified state.
-    let proven_db = proven_db::build_proven_db(input);
+/// Execute every block against the proof-verified `proven_db` and compute the
+/// batch commitment. This is the shared core: `execute_and_commit_inner`
+/// (collecting path) and `execute_and_commit_streaming` (FIX A) both funnel a
+/// fully built `ProvenDB` plus the (possibly proof-stripped) `BatchInput`
+/// through here, so the two paths produce a byte-identical commitment.
+///
+/// `input.blocks[].storage_proofs` is NEVER read here — only
+/// `build_proven_db`/streaming consume it — so the streaming path may pass
+/// blocks whose proofs have already been verified and dropped.
+fn run_execution_and_commit(
+    input: &BatchInput,
+    spec_id: ZkSpecId,
+    proven_db: proven_db::ProvenDB,
+) -> (BatchOutput, B256, B256, B256, B256) {
+    let meta = &input.batch_meta;
     let mut cache_db = CacheDB::new(proven_db);
 
     let mut block_results = Vec::with_capacity(input.blocks.len());
@@ -302,4 +327,29 @@ pub fn execute_and_commit_from_bincode(
     let batch_input: BatchInput =
         bincode::deserialize(bincode_data).map_err(|e| format!("deserialize: {e}"))?;
     Ok(execute_and_commit(&batch_input))
+}
+
+/// FIX A — streaming execution from bincode-serialized `BatchInput` bytes.
+///
+/// This is the memory-lean entry point the ZiSK guest uses. Instead of
+/// `bincode::deserialize::<BatchInput>` (which materialises EVERY merkle
+/// sibling on the heap before verification — the read-spam OOM floor), it
+/// parses the wire format with a `DeserializeSeed` tower that consumes the
+/// `storage_proofs` sequence element-by-element: each proof is deserialized,
+/// verified against the block's pre-state root, its value extracted into the
+/// `ProvenDB` under construction, and then DROPPED before the next proof is
+/// read. The siblings are therefore never all resident at once — the resident
+/// set holds only the small verified value map.
+///
+/// The wire format is unchanged: the server still `bincode`-serialises
+/// `BatchInput` exactly as before. Only the guest's *parsing* differs, and the
+/// resulting `ProvenDB` + commitment are byte-identical to the collecting path
+/// (`execute_and_commit_from_bincode`). See `stream.rs`.
+pub fn execute_and_commit_streaming(
+    bincode_data: &[u8],
+) -> Result<(BatchOutput, B256), String> {
+    let (input, proven_db) = stream::stream_deserialize_and_build_db(bincode_data)?;
+    let spec_id = resolve_spec_and_validate(&input);
+    let (output, commitment, _, _, _) = run_execution_and_commit(&input, spec_id, proven_db);
+    Ok((output, commitment))
 }
