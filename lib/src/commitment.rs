@@ -67,6 +67,15 @@ const L2_TO_L1_TREE_HEIGHT: usize = 14;
 /// Each leaf is keccak256 of an 88-byte encoded L2ToL1Log.
 /// Empty leaves are keccak256([0u8; 88]).
 pub fn l2_to_l1_logs_root(encoded_logs: &[[u8; L2_TO_L1_LOG_SIZE]]) -> B256 {
+    // The fixed-height fold silently returns a subtree root (not the true root)
+    // once the leaves exceed the tree capacity, so reject that case rather than
+    // commit a wrong root that only cross-prover disagreement would catch.
+    assert!(
+        encoded_logs.len() <= 1 << L2_TO_L1_TREE_HEIGHT,
+        "L2->L1 log count {} exceeds the height-{L2_TO_L1_TREE_HEIGHT} tree capacity {}",
+        encoded_logs.len(),
+        1usize << L2_TO_L1_TREE_HEIGHT,
+    );
     let empty_leaf = keccak256(&[0u8; L2_TO_L1_LOG_SIZE]);
     let mut empty_hashes = vec![empty_leaf];
     for _ in 0..L2_TO_L1_TREE_HEIGHT {
@@ -206,16 +215,6 @@ pub fn da_commitment_blobs(versioned_hashes: &[B256]) -> B256 {
         data.extend_from_slice(hash.as_slice());
     }
     keccak256(&data)
-}
-
-/// Transactions rolling hash (used as transactions_root in block header).
-/// Start with 0x00...00, then for each tx: hash = keccak256(prev_hash || tx_hash)
-pub fn transactions_rolling_hash(tx_hashes: &[B256]) -> B256 {
-    let mut hash = B256::ZERO;
-    for tx_hash in tx_hashes {
-        hash = keccak_compress(&hash, tx_hash);
-    }
-    hash
 }
 
 /// Full batch public input hash, matching zksync-os draft-0.4.0

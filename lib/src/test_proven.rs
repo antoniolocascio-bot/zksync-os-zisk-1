@@ -1405,6 +1405,705 @@ mod tests {
         );
     }
 
+    // ======== FINDING 3 / W2.3: after-ring anchoring (regression) ========
+    //
+    // Question under test: is `meta.previous_block_hashes` (the pre-fix input to
+    // `block_hashes_blake_after` / `state_after`) soundly anchored, or could an
+    // operator forge an entry that passes every in-guest check while differing
+    // from the true block-hash ring?
+    //
+    // Pre-fix, `previous_block_hashes` was folded verbatim into `state_after`
+    // and checked only by the cross-check in `proven_db::build_block_hashes`,
+    // which fires for a slot only when SOME block lists that block in its
+    // `block_hashes` AND `previous_block_hashes[idx] != 0`. Two seams left slots
+    // as free parameters of `state_after`, and both tests below ORIGINALLY
+    // accepted the forgery.
+    //
+    // W2.3 fix: `block_hashes_blake_after` is now reconstructed in
+    // `run_execution_and_commit` from authenticated data only (the L1-pinned
+    // before-ring plus the guest's `computed_block_hashes`); the witness ring is
+    // never folded in. The tests therefore now assert the forgery is NEUTRALIZED
+    // (forged and honest runs commit to the SAME value), and each keeps a
+    // secondary control showing the pre-existing proven_db cross-check still
+    // fires where it can.
+
+    /// SEAM 1 (the windowing seam, multi-block): the slot for the batch's OWN
+    /// first block. Its block number is > `first-1`, so it is outside the
+    /// pre-state before-ring window `[first-256, first-1]`, and if the last block
+    /// OMITS its parent from `block_hashes` (parent_hash then defaults to zero
+    /// via `evm.rs`'s `unwrap_or(ZERO)`, `block_header_hash` unchecked), nothing
+    /// references it: pre-fix it fed `block_hashes_blake_after` unconstrained.
+    ///
+    /// This test drives THREE runs that differ ONLY in that one slot. Post-fix
+    /// the slot is taken from `computed_block_hashes` regardless of the witness,
+    /// so all three now produce the SAME commitment (forgery neutralized).
+    #[test]
+    fn finding3_after_ring_own_first_block_slot_unanchored() {
+        use blake2::{Blake2s256, Digest};
+
+        const BNB: u64 = 300;
+        const FIRST: u64 = BNB + 1; // 301
+        const LAST: u64 = FIRST + 1; // 302
+
+        let hh = |num: u64| -> B256 {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&num.to_be_bytes());
+            b[31] = 0xA5;
+            B256::from(b)
+        };
+
+        // First block's before-ring window: blocks 45..=300 (256 non-zero).
+        let first_block_hashes: Vec<(u64, B256)> =
+            ((FIRST - 256)..FIRST).map(|n| (n, hh(n))).collect();
+
+        // Pinned before-value computed the server way (Blake2s over 256-ring).
+        let server_pinned = {
+            let mut ring = [B256::ZERO; 256];
+            for &(n, h) in &first_block_hashes {
+                ring[(n + 256 - FIRST) as usize] = h;
+            }
+            let mut hasher = Blake2s256::new();
+            for e in &ring {
+                hasher.update(e.as_slice());
+            }
+            B256::from_slice(&hasher.finalize())
+        };
+
+        // Last block (302) OMITS its parent (301) from block_hashes -> the seam
+        // is open: no block references block 301, so neither the intra-batch
+        // check nor proven_db's cross-check ever touches previous_block_hashes
+        // index 254 (block 301).
+        let second_block_hashes: Vec<(u64, B256)> =
+            ((LAST - 256)..(LAST - 1)).map(|n| (n, hh(n))).collect(); // 46..=300
+
+        // index j <-> block (LAST-255+j) = 47+j -> 47..=301. Blocks 47..=300
+        // (j in 0..=253) carry the true historical hash; slot j=254 (block 301,
+        // the batch's OWN first block) is the variable under test.
+        let prev_with_slot254 = |slot254: B256| -> Vec<B256> {
+            (0..255u64)
+                .map(|j| {
+                    let num = (LAST - 255) + j;
+                    if num == LAST - 1 { slot254 } else { hh(num) }
+                })
+                .collect()
+        };
+
+        // ---- minimal tree + force_fail L1 tx (coinbase = sender) ----
+        let sender: Address = "0x1000000000000000000000000000000000000001".parse().unwrap();
+        let recipient: Address = "0x2000000000000000000000000000000000000002".parse().unwrap();
+        let sender_props = encode_account_props(0, U256::from(10_000_000_000_000_000_000u128));
+        let sender_props_hash = AccountProperties::hash(&sender_props);
+        let sender_flat_key = derive_account_properties_key(&sender.into_array());
+        let (tree_root, leaf_count, siblings) =
+            build_minimal_tree(&sender_flat_key, &sender_props_hash);
+
+        let l1_abi = {
+            let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+            abi[31] = 0x20;
+            abi[32 + 31] = 0x7f;
+            abi[32 + 32 + 12..32 + 32 + 32].copy_from_slice(sender.as_slice());
+            abi[32 + 64 + 12..32 + 64 + 32].copy_from_slice(recipient.as_slice());
+            abi[32 + 96 + 24..32 + 96 + 32].copy_from_slice(&21_000u64.to_be_bytes());
+            abi[32 + 160 + 16..32 + 160 + 32].copy_from_slice(&250_000_000u128.to_be_bytes());
+            abi[32 + 352 + 12..32 + 352 + 32].copy_from_slice(sender.as_slice());
+            let dyn_base = 19u32 * 32;
+            for j in 0..5u32 {
+                let off = 32 + (14 + j as usize) * 32;
+                abi[off + 28..off + 32].copy_from_slice(&(dyn_base + j * 32).to_be_bytes());
+            }
+            abi
+        };
+        let l1_tx_hash = alloy_primitives::keccak256(&l1_abi);
+
+        let mk_block = |number: u64, block_hashes: Vec<(u64, B256)>| -> BlockInput {
+            BlockInput {
+                number,
+                timestamp: 1700000000,
+                base_fee: 250_000_000,
+                gas_limit: 80_000_000,
+                coinbase: sender,
+                prev_randao: B256::from([1u8; 32]),
+                block_header_hash: B256::ZERO,
+                storage_proofs: vec![(
+                    sender_flat_key,
+                    StorageProof::Existing(SlotProofEntry {
+                        index: 2,
+                        value: sender_props_hash,
+                        next_index: 1,
+                        siblings: siblings.clone(),
+                    }),
+                )],
+                account_preimages: vec![(sender, sender_props.clone())],
+                transactions: vec![TxInput {
+                    chain_id: Some(270),
+                    gas_used_override: Some(0),
+                    force_fail: true,
+                    auth: TxAuth::L1 { tx_hash: l1_tx_hash, abi_encoded: l1_abi.clone() },
+                }],
+                block_hashes,
+                l2_to_l1_logs: vec![L2ToL1LogEntry {
+                    l2_shard_id: 0,
+                    is_service: true,
+                    tx_number_in_block: 0,
+                    sender: "0x0000000000000000000000000000000000008001".parse().unwrap(),
+                    key: l1_tx_hash,
+                    value: B256::ZERO,
+                }],
+                expected_tree_root: B256::ZERO,
+            }
+        };
+
+        let build = |second_bh: Vec<(u64, B256)>, prev_bh: Vec<B256>| -> BatchInput {
+            BatchInput {
+                version: crate::types::BATCH_INPUT_VERSION,
+                chain_id: 270,
+                spec_id: 1,
+                protocol_version_minor: 30,
+                batch_meta: BatchMeta {
+                    tree_root_before: tree_root,
+                    leaf_count_before: leaf_count,
+                    block_number_before: BNB,
+                    last_block_timestamp_before: 0,
+                    block_hashes_blake_before: server_pinned,
+                    previous_block_hashes: prev_bh,
+                    upgrade_tx_hash: B256::ZERO,
+                    da_commitment_scheme: 2,
+                    pubdata: vec![],
+                    multichain_root: B256::ZERO,
+                    sl_chain_id: 0,
+                    blob_versioned_hashes: vec![],
+                    tree_update: None,
+                    account_preimages_after: vec![],
+                    fri_proof_verification_enabled: false,
+                    max_tx_gas_limit: 1 << 24,
+                },
+                blocks: vec![mk_block(FIRST, first_block_hashes.clone()), mk_block(LAST, second_bh)],
+                bytecodes: vec![],
+            }
+        };
+
+        // Run once (slot254 = 0) to learn the TRUE in-guest computed hash of the
+        // batch's own first block 301 — the value the after-ring SHOULD carry.
+        let (out0, c_zero) =
+            executor::execute_and_commit(&build(second_block_hashes.clone(), prev_with_slot254(B256::ZERO)));
+        let true_301 = out0.block_results[0].computed_block_header_hash;
+        assert_eq!(out0.block_results[0].block_number, FIRST);
+        assert_ne!(true_301, B256::ZERO, "block 301 must have a non-zero computed hash");
+
+        // Slot254 = the TRUE hash (what an honest full witness would carry).
+        let (_out_t, c_true) =
+            executor::execute_and_commit(&build(second_block_hashes.clone(), prev_with_slot254(true_301)));
+
+        // Slot254 = an ARBITRARY forged value that is NOT the true hash.
+        let forged_val = B256::repeat_byte(0xEE);
+        assert_ne!(forged_val, true_301, "forged value must differ from the true hash");
+        assert_ne!(forged_val, B256::ZERO);
+        let (_out_f, c_forged) =
+            executor::execute_and_commit(&build(second_block_hashes.clone(), prev_with_slot254(forged_val)));
+
+        // POST-FIX VERDICT (W2.3): `block_hashes_blake_after` is reconstructed
+        // from authenticated data only (the L1-pinned before-ring plus the
+        // guest's own `computed_block_hashes`); `meta.previous_block_hashes` is
+        // never folded into `state_after`. Slot 254 is block 301 (the batch's
+        // OWN first block, an intra-batch block), whose value is taken from
+        // `computed_block_hashes[301]` regardless of the witness. The forgery is
+        // therefore NEUTRALIZED: all three runs commit to the SAME value, so the
+        // operator can no longer fold an arbitrary hash into state_after.
+        assert_eq!(c_zero, c_true, "zeroed slot must NOT change state_after");
+        assert_eq!(c_true, c_forged, "forged slot must NOT change state_after");
+        assert_eq!(c_zero, c_forged, "all forgeries collapse to the honest commitment");
+        println!("[FINDING3 seam1] true_block301_hash = {true_301}");
+        println!("[FINDING3 seam1] commitment(slot254=0)      = {c_zero}");
+        println!("[FINDING3 seam1] commitment(slot254=true)   = {c_true}");
+        println!("[FINDING3 seam1] commitment(slot254=forged) = {c_forged}");
+
+        // ---- Secondary guard (pre-existing proven_db cross-check) ----------
+        // When the last block DOES list its parent (301, true_301), the
+        // proven_db cross-check additionally rejects a non-zero forged slot with
+        // a hard panic. This layered defense is orthogonal to (and survives) the
+        // reconstruction fix above; the honest anchored witness still passes.
+        let mut anchored_second: Vec<(u64, B256)> = second_block_hashes.clone();
+        anchored_second.push((FIRST, true_301)); // block 302 lists parent 301
+
+        // With the slot set honestly, the anchored witness passes.
+        let (_o, _c_ok) =
+            executor::execute_and_commit(&build(anchored_second.clone(), prev_with_slot254(true_301)));
+
+        // With the slot forged, the cross-check rejects it.
+        let rejected = std::panic::catch_unwind(|| {
+            executor::execute_and_commit(&build(anchored_second.clone(), prev_with_slot254(forged_val)));
+        });
+        assert!(
+            rejected.is_err(),
+            "when the last block anchors block 301, forging its after-ring slot MUST be rejected"
+        );
+    }
+
+    /// SEAM 2 (the zero guard, single-block): the `if !verified_hash.is_zero()`
+    /// guard in `proven_db::build_block_hashes` let an operator ZERO OUT a
+    /// `previous_block_hashes` slot whose TRUE value is non-zero, even for a
+    /// pre-state block that IS listed in `block_hashes` and IS inside the pinned
+    /// before-ring window: the cross-check silently skipped the zeroed slot and
+    /// (pre-fix) it flowed into `block_hashes_blake_after`. Post-fix that slot is
+    /// pre-batch, so its value is taken from the L1-authenticated before-ring and
+    /// the zeroing no longer reaches `state_after`. Single-block, full ring
+    /// (N=300).
+    #[test]
+    fn finding3_after_ring_zero_guard_seam() {
+        use blake2::{Blake2s256, Digest};
+
+        const N: u64 = 300; // last_num >= 255 -> the cross-check branch is active
+
+        let hh = |num: u64| -> B256 {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&num.to_be_bytes());
+            b[31] = 0x5A;
+            B256::from(b)
+        };
+
+        // Before-ring window for block N: blocks (N-256)..=(N-1) = 44..=299.
+        let block_hashes: Vec<(u64, B256)> = ((N - 256)..N).map(|n| (n, hh(n))).collect();
+        let server_pinned = {
+            let mut ring = [B256::ZERO; 256];
+            for &(n, h) in &block_hashes {
+                ring[(n + 256 - N) as usize] = h;
+            }
+            let mut hasher = Blake2s256::new();
+            for e in &ring {
+                hasher.update(e.as_slice());
+            }
+            B256::from_slice(&hasher.finalize())
+        };
+
+        // after-ring previous entries: index j <-> block (N-255+j) = 45+j ->
+        // 45..=299. Honest: every slot carries its true historical hash. Block
+        // 100 sits at index 100-45 = 55, is listed in block_hashes, and is inside
+        // the before-ring window — the "most anchored" kind of slot.
+        let honest_prev: Vec<B256> = (0..255u64).map(|j| hh((N - 255) + j)).collect();
+        let mut forged_prev = honest_prev.clone();
+        forged_prev[(100 - (N - 255)) as usize] = B256::ZERO; // zero out block 100's slot
+
+        let sender: Address = "0x1000000000000000000000000000000000000001".parse().unwrap();
+        let recipient: Address = "0x2000000000000000000000000000000000000002".parse().unwrap();
+        let sender_props = encode_account_props(0, U256::from(10_000_000_000_000_000_000u128));
+        let sender_props_hash = AccountProperties::hash(&sender_props);
+        let sender_flat_key = derive_account_properties_key(&sender.into_array());
+        let (tree_root, leaf_count, siblings) =
+            build_minimal_tree(&sender_flat_key, &sender_props_hash);
+
+        let l1_abi = {
+            let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+            abi[31] = 0x20;
+            abi[32 + 31] = 0x7f;
+            abi[32 + 32 + 12..32 + 32 + 32].copy_from_slice(sender.as_slice());
+            abi[32 + 64 + 12..32 + 64 + 32].copy_from_slice(recipient.as_slice());
+            abi[32 + 96 + 24..32 + 96 + 32].copy_from_slice(&21_000u64.to_be_bytes());
+            abi[32 + 160 + 16..32 + 160 + 32].copy_from_slice(&250_000_000u128.to_be_bytes());
+            abi[32 + 352 + 12..32 + 352 + 32].copy_from_slice(sender.as_slice());
+            let dyn_base = 19u32 * 32;
+            for j in 0..5u32 {
+                let off = 32 + (14 + j as usize) * 32;
+                abi[off + 28..off + 32].copy_from_slice(&(dyn_base + j * 32).to_be_bytes());
+            }
+            abi
+        };
+        let l1_tx_hash = alloy_primitives::keccak256(&l1_abi);
+
+        let build = |prev_bh: Vec<B256>| -> BatchInput {
+            BatchInput {
+                version: crate::types::BATCH_INPUT_VERSION,
+                chain_id: 270,
+                spec_id: 1,
+                protocol_version_minor: 30,
+                batch_meta: BatchMeta {
+                    tree_root_before: tree_root,
+                    leaf_count_before: leaf_count,
+                    block_number_before: N - 1,
+                    last_block_timestamp_before: 0,
+                    block_hashes_blake_before: server_pinned,
+                    previous_block_hashes: prev_bh,
+                    upgrade_tx_hash: B256::ZERO,
+                    da_commitment_scheme: 2,
+                    pubdata: vec![],
+                    multichain_root: B256::ZERO,
+                    sl_chain_id: 0,
+                    blob_versioned_hashes: vec![],
+                    tree_update: None,
+                    account_preimages_after: vec![],
+                    fri_proof_verification_enabled: false,
+                    max_tx_gas_limit: 1 << 24,
+                },
+                blocks: vec![BlockInput {
+                    number: N,
+                    timestamp: 1700000000,
+                    base_fee: 250_000_000,
+                    gas_limit: 80_000_000,
+                    coinbase: sender,
+                    prev_randao: B256::from([1u8; 32]),
+                    block_header_hash: B256::ZERO,
+                    storage_proofs: vec![(
+                        sender_flat_key,
+                        StorageProof::Existing(SlotProofEntry {
+                            index: 2,
+                            value: sender_props_hash,
+                            next_index: 1,
+                            siblings: siblings.clone(),
+                        }),
+                    )],
+                    account_preimages: vec![(sender, sender_props.clone())],
+                    transactions: vec![TxInput {
+                        chain_id: Some(270),
+                        gas_used_override: Some(0),
+                        force_fail: true,
+                        auth: TxAuth::L1 { tx_hash: l1_tx_hash, abi_encoded: l1_abi.clone() },
+                    }],
+                    block_hashes: block_hashes.clone(),
+                    l2_to_l1_logs: vec![L2ToL1LogEntry {
+                        l2_shard_id: 0,
+                        is_service: true,
+                        tx_number_in_block: 0,
+                        sender: "0x0000000000000000000000000000000000008001".parse().unwrap(),
+                        key: l1_tx_hash,
+                        value: B256::ZERO,
+                    }],
+                    expected_tree_root: B256::ZERO,
+                }],
+                bytecodes: vec![],
+            }
+        };
+
+        // POST-FIX VERDICT (W2.3): the after-ring is reconstructed from
+        // authenticated data. Slot 55 (block 100) is pre-batch, so its value is
+        // taken from the L1-authenticated before-ring, NOT from the witness
+        // `previous_block_hashes`. Zeroing the witness slot no longer reaches
+        // `state_after` — the zero guard in proven_db is irrelevant to the
+        // commitment now — so the honest and "zeroed" runs commit to the SAME
+        // value. The forgery is neutralized.
+        let (_oh, c_honest) = executor::execute_and_commit(&build(honest_prev.clone()));
+        let (_of, c_forged) = executor::execute_and_commit(&build(forged_prev.clone()));
+
+        assert_eq!(
+            c_honest, c_forged,
+            "zeroing a pre-state previous_block_hashes slot must NOT change state_after"
+        );
+        println!("[FINDING3 seam2] commitment(honest)         = {c_honest}");
+        println!("[FINDING3 seam2] commitment(slot55 zeroed)  = {c_forged}");
+
+        // Negative control: had proven_db cross-checked without the zero guard,
+        // a *non-zero* forgery of the SAME (listed, in-window) slot would be
+        // rejected — confirming the ONLY thing that lets slot 55 be forged is
+        // the zero guard, not a broken harness.
+        let mut nonzero_forge = honest_prev.clone();
+        nonzero_forge[(100 - (N - 255)) as usize] = B256::repeat_byte(0xEE);
+        let rejected = std::panic::catch_unwind(|| {
+            executor::execute_and_commit(&build(nonzero_forge));
+        });
+        assert!(
+            rejected.is_err(),
+            "a non-zero forgery of a listed in-window slot IS caught by the cross-check"
+        );
+    }
+
+    // ========== W2.1 / W2.2: write-set completeness & reconciliation ==========
+
+    /// Honest single-block batch: a legacy self-transfer that debits `sender` a
+    /// 21000*10 gas fee (nonce 0->1) and credits `coinbase`, over a 4-leaf dense
+    /// tree (MIN/MAX guards + sender + coinbase). Both changed accounts are
+    /// covered by an after-preimage and a matching `tree_update` Update. Callers
+    /// clone the result and tamper one field to exercise the reconciliation
+    /// guards. Returns (batch, sender, coinbase, k_sender, k_coinbase,
+    /// sender_after, coinbase_after).
+    #[allow(clippy::type_complexity)]
+    fn w2_honest_transfer_batch(
+    ) -> (BatchInput, Address, Address, B256, B256, Vec<u8>, Vec<u8>) {
+        const GAS_PRICE: u64 = 10;
+        const GAS_USED: u64 = 21_000;
+        let sender_balance_before = U256::from(1_000_000_000_000_000_000u128);
+        let coinbase_balance_before = U256::from(5u64);
+        let fee = U256::from(GAS_USED) * U256::from(GAS_PRICE as u128);
+
+        // Derive the sender from the fixed key, then sign a self-transfer to it.
+        let (sender, _) = sign_legacy([0x42u8; 32], 0, Address::ZERO, vec![], 100_000);
+        let (_, signed_bytes) = sign_legacy([0x42u8; 32], 0, sender, vec![], 100_000);
+        let coinbase: Address =
+            "0x00000000000000000000000000000000c01badde".parse().unwrap();
+
+        let sender_props = encode_account_props(0, sender_balance_before);
+        let coinbase_props = encode_account_props(0, coinbase_balance_before);
+        let k_sender = derive_account_properties_key(&sender.into_array());
+        let k_coinbase = derive_account_properties_key(&coinbase.into_array());
+        let (root, leaves, siblings) = build_dense_tree(&[
+            (k_sender, AccountProperties::hash(&sender_props)),
+            (k_coinbase, AccountProperties::hash(&coinbase_props)),
+        ]);
+        let proof_for = |idx: usize| -> StorageProof {
+            let (i, leaf) = &leaves[idx];
+            StorageProof::Existing(SlotProofEntry {
+                index: *i,
+                value: leaf.value,
+                next_index: leaf.next_index,
+                siblings: siblings[idx].clone(),
+            })
+        };
+
+        let sender_after = encode_account_props(1, sender_balance_before - fee);
+        let coinbase_after = encode_account_props(0, coinbase_balance_before + fee);
+
+        let batch = BatchInput {
+            version: crate::types::BATCH_INPUT_VERSION,
+            chain_id: 1,
+            spec_id: 2,
+            protocol_version_minor: 31,
+            batch_meta: BatchMeta {
+                tree_root_before: root,
+                leaf_count_before: 4,
+                block_number_before: 0,
+                last_block_timestamp_before: 0,
+                block_hashes_blake_before: empty_ring_blake(),
+                previous_block_hashes: vec![],
+                upgrade_tx_hash: B256::ZERO,
+                da_commitment_scheme: 2,
+                pubdata: vec![],
+                multichain_root: B256::ZERO,
+                sl_chain_id: 1,
+                blob_versioned_hashes: vec![],
+                tree_update: Some(BatchTreeUpdate {
+                    operations: vec![WriteOp::Update { index: 2 }, WriteOp::Update { index: 3 }],
+                    entries: vec![
+                        (k_sender, AccountProperties::hash(&sender_after)),
+                        (k_coinbase, AccountProperties::hash(&coinbase_after)),
+                    ],
+                    sorted_leaves: leaves.clone(),
+                    intermediate_hashes: vec![],
+                    leaf_count_before: 4,
+                }),
+                account_preimages_after: vec![
+                    (sender, sender_after.clone()),
+                    (coinbase, coinbase_after.clone()),
+                ],
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+            },
+            blocks: vec![BlockInput {
+                number: 1,
+                timestamp: 1700000000,
+                base_fee: 7,
+                gas_limit: 1_000_000,
+                coinbase,
+                prev_randao: B256::from([1u8; 32]),
+                block_header_hash: B256::ZERO,
+                storage_proofs: vec![(k_sender, proof_for(2)), (k_coinbase, proof_for(3))],
+                account_preimages: vec![
+                    (sender, sender_props.clone()),
+                    (coinbase, coinbase_props.clone()),
+                ],
+                transactions: vec![TxInput {
+                    chain_id: Some(1),
+                    gas_used_override: Some(GAS_USED),
+                    force_fail: false,
+                    auth: TxAuth::L2 { signed_bytes: signed_bytes.clone() },
+                }],
+                block_hashes: vec![],
+                l2_to_l1_logs: vec![],
+                expected_tree_root: B256::ZERO,
+            }],
+            bytecodes: vec![],
+        };
+        (batch, sender, coinbase, k_sender, k_coinbase, sender_after, coinbase_after)
+    }
+
+    /// W2.1 — a duplicated `tree_update.entries` key inflates `.len()` to match
+    /// `revm_writes` while the forward pass silently drops a genuine write
+    /// (coinbase's credit). The dedup assert rejects it; the honest batch (with
+    /// distinct keys) still passes and its commitment is unchanged.
+    #[test]
+    fn w2_1_duplicate_tree_update_key_rejected() {
+        let (honest, _s, _c, k_sender, _kc, sender_after, _ca) = w2_honest_transfer_batch();
+        // Honest passes.
+        let (out, _c) = executor::execute_and_commit(&honest);
+        assert!(out.block_results[0].tx_results[0].success);
+
+        // Forge: duplicate k_sender (dropping k_coinbase). Two entries, two ops,
+        // len still 2 == revm_writes.len(); before the fix the forward pass
+        // never examined k_coinbase and its leaf kept the stale pre-state value.
+        let mut forged = honest.clone();
+        let tu = forged.batch_meta.tree_update.as_mut().unwrap();
+        tu.operations = vec![WriteOp::Update { index: 2 }, WriteOp::Update { index: 2 }];
+        tu.entries = vec![
+            (k_sender, AccountProperties::hash(&sender_after)),
+            (k_sender, AccountProperties::hash(&sender_after)),
+        ];
+        let rejected = std::panic::catch_unwind(|| executor::execute_and_commit(&forged));
+        assert!(
+            rejected.is_err(),
+            "duplicate-key tree_update (dropping a real write) must be rejected"
+        );
+    }
+
+    /// W2.2 (injection) — an after-preimage for an account REVM never executed,
+    /// in a normal (non-upgrade) batch, is a fabricated write (minting a balance
+    /// onto a dormant EOA). The injection guard rejects it.
+    #[test]
+    fn w2_2_inject_untouched_eoa_rejected() {
+        let (honest, _s, _c, _ks, _kc, _sa, _ca) = w2_honest_transfer_batch();
+        let _ = executor::execute_and_commit(&honest);
+
+        let dormant: Address =
+            "0x00000000000000000000000000000000deadbeef".parse().unwrap();
+        // Inflated balance minted onto an account no transaction touched.
+        let dormant_after = encode_account_props(0, U256::from(9_999_999_999u64));
+
+        let mut forged = honest.clone();
+        forged
+            .batch_meta
+            .account_preimages_after
+            .push((dormant, dormant_after));
+        let rejected = std::panic::catch_unwind(|| executor::execute_and_commit(&forged));
+        assert!(
+            rejected.is_err(),
+            "after-preimage for a non-executed account in a normal batch must be rejected"
+        );
+    }
+
+    /// W2.2 (omission) — a batch that credits `coinbase` but omits it from BOTH
+    /// `account_preimages_after` and `tree_update`: the write-set stays
+    /// internally consistent (1 write each), so the pre-fix set-equality passed
+    /// and `state_after` silently dropped coinbase's credit. The completeness
+    /// check now flags the REVM-changed account.
+    #[test]
+    fn w2_2_omit_changed_account_rejected() {
+        let (honest, sender, _c, k_sender, _kc, sender_after, _ca) = w2_honest_transfer_batch();
+        let _ = executor::execute_and_commit(&honest);
+
+        let mut forged = honest.clone();
+        // Keep only sender's after-preimage and tree write; drop coinbase's.
+        forged.batch_meta.account_preimages_after = vec![(sender, sender_after.clone())];
+        let tu = forged.batch_meta.tree_update.as_mut().unwrap();
+        tu.operations = vec![WriteOp::Update { index: 2 }];
+        tu.entries = vec![(k_sender, AccountProperties::hash(&sender_after))];
+        let rejected = std::panic::catch_unwind(|| executor::execute_and_commit(&forged));
+        assert!(
+            rejected.is_err(),
+            "omitting a REVM-changed account (coinbase credit) must be rejected"
+        );
+    }
+
+    /// W2.2 — the injection guard OPENS for upgrade batches, the sanctioned
+    /// force-deploy / system path (a documented trusted hole). An Upgrade tx is
+    /// present (so `upgrade_tx_hash` is authenticated nonzero), and a
+    /// non-executed account carries an after-preimage plus a matching tree
+    /// write. This honest force-deploy-style batch passes.
+    #[test]
+    fn w2_2_upgrade_batch_allows_non_executed_after_preimage() {
+        // Caller of the (force-failed) Upgrade tx.
+        let sender: Address =
+            "0x1000000000000000000000000000000000000001".parse().unwrap();
+        let recipient: Address =
+            "0x2000000000000000000000000000000000000002".parse().unwrap();
+        // Force-deployed target: no transaction touches it; the upgrade sets its
+        // account properties directly (represented here by nonce/balance).
+        let fd: Address = "0x000000000000000000000000000000000000800f".parse().unwrap();
+
+        let sender_props = encode_account_props(0, U256::from(10_000_000_000_000_000_000u128));
+        let fd_props_old = encode_account_props(0, U256::ZERO);
+        let fd_after = encode_account_props(1, U256::from(42u64));
+        let k_sender = derive_account_properties_key(&sender.into_array());
+        let k_fd = derive_account_properties_key(&fd.into_array());
+        let (root, leaves, siblings) = build_dense_tree(&[
+            (k_sender, AccountProperties::hash(&sender_props)),
+            (k_fd, AccountProperties::hash(&fd_props_old)),
+        ]);
+        let proof_for = |idx: usize| -> StorageProof {
+            let (i, leaf) = &leaves[idx];
+            StorageProof::Existing(SlotProofEntry {
+                index: *i,
+                value: leaf.value,
+                next_index: leaf.next_index,
+                siblings: siblings[idx].clone(),
+            })
+        };
+
+        // Upgrade tx (type 0x7e), force-failed so no execution-side state change.
+        let upgrade_abi = {
+            let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+            abi[31] = 0x20;
+            abi[32 + 31] = 0x7e; // txType = upgrade
+            abi[32 + 32 + 12..32 + 32 + 32].copy_from_slice(sender.as_slice()); // from
+            abi[32 + 64 + 12..32 + 64 + 32].copy_from_slice(recipient.as_slice()); // to
+            abi[32 + 96 + 24..32 + 96 + 32].copy_from_slice(&21_000u64.to_be_bytes()); // gas
+            abi[32 + 160 + 16..32 + 160 + 32].copy_from_slice(&250_000_000u128.to_be_bytes());
+            abi[32 + 352 + 12..32 + 352 + 32].copy_from_slice(sender.as_slice()); // refund
+            let dyn_base = 19u32 * 32;
+            for j in 0..5u32 {
+                let off = 32 + (14 + j as usize) * 32;
+                abi[off + 28..off + 32].copy_from_slice(&(dyn_base + j * 32).to_be_bytes());
+            }
+            abi
+        };
+        let upgrade_tx_hash = alloy_primitives::keccak256(&upgrade_abi);
+
+        let batch = BatchInput {
+            version: crate::types::BATCH_INPUT_VERSION,
+            chain_id: 270,
+            spec_id: 1,
+            protocol_version_minor: 30,
+            batch_meta: BatchMeta {
+                tree_root_before: root,
+                leaf_count_before: 4,
+                block_number_before: 0,
+                last_block_timestamp_before: 0,
+                block_hashes_blake_before: empty_ring_blake(),
+                previous_block_hashes: vec![],
+                upgrade_tx_hash,
+                da_commitment_scheme: 2,
+                pubdata: vec![],
+                multichain_root: B256::ZERO,
+                sl_chain_id: 0,
+                blob_versioned_hashes: vec![],
+                tree_update: Some(BatchTreeUpdate {
+                    operations: vec![WriteOp::Update { index: 3 }],
+                    entries: vec![(k_fd, AccountProperties::hash(&fd_after))],
+                    sorted_leaves: leaves.clone(),
+                    intermediate_hashes: vec![],
+                    leaf_count_before: 4,
+                }),
+                // Non-executed force-deploy target: accepted because this is an
+                // upgrade batch.
+                account_preimages_after: vec![(fd, fd_after.clone())],
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+            },
+            blocks: vec![BlockInput {
+                number: 1,
+                timestamp: 1700000000,
+                base_fee: 250_000_000,
+                gas_limit: 80_000_000,
+                coinbase: sender,
+                prev_randao: B256::from([1u8; 32]),
+                block_header_hash: B256::ZERO,
+                storage_proofs: vec![(k_sender, proof_for(2))],
+                account_preimages: vec![(sender, sender_props.clone())],
+                transactions: vec![TxInput {
+                    chain_id: Some(270),
+                    gas_used_override: Some(0),
+                    force_fail: true,
+                    auth: TxAuth::Upgrade {
+                        tx_hash: upgrade_tx_hash,
+                        abi_encoded: upgrade_abi.clone(),
+                    },
+                }],
+                block_hashes: vec![],
+                l2_to_l1_logs: vec![],
+                expected_tree_root: B256::ZERO,
+            }],
+            bytecodes: vec![],
+        };
+
+        // Honest upgrade batch with a non-executed force-deploy write: passes.
+        let (_out, commitment) = executor::execute_and_commit(&batch);
+        assert_ne!(commitment, B256::ZERO, "honest upgrade batch must commit");
+    }
+
     // ======================= Streaming deserialize =======================
 
     /// The streaming entry point (`execute_and_commit_streaming`, guest path)

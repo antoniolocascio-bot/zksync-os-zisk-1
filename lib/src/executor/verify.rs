@@ -22,6 +22,7 @@ pub(super) fn build_revm_write_map(
     storage_writes: &HashMap<(Address, U256), U256>,
     cache_db: &CacheDB<ProvenDB>,
     after_preimages: &[(Address, Vec<u8>)],
+    is_upgrade_batch: bool,
 ) -> HashMap<B256, B256> {
     let proven_db = &cache_db.db;
     let after_map: HashMap<&Address, &Vec<u8>> = after_preimages.iter()
@@ -56,6 +57,19 @@ pub(super) fn build_revm_write_map(
                 revm::database::AccountState::None | revm::database::AccountState::NotExisting
             )
         });
+
+        // Injection guard. An after-preimage for an account REVM never executed
+        // is unconstrained by the nonce/balance pin below, so accepting it lets
+        // an operator fabricate an account-property write (e.g. mint a balance
+        // onto a dormant EOA). The only legitimate non-executed write is the
+        // system force-deploy path, which is confined to upgrade batches (the
+        // documented trusted hole). Outside an upgrade batch, reject it.
+        assert!(
+            executed.is_some() || is_upgrade_batch,
+            "after-preimage for non-executed account {addr} outside an upgrade batch: \
+             account-property writes must correspond to accounts changed by execution"
+        );
+
         if let Some(db_account) = executed {
             let info = &db_account.info;
             assert_eq!(props.nonce, info.nonce,
@@ -102,6 +116,46 @@ pub(super) fn build_revm_write_map(
         writes.insert(flat_key, merkle::AccountProperties::hash(after_preimage));
     }
 
+    // Completeness. The loop above pins each *provided* after-preimage to REVM's
+    // output, but nothing yet forces every account REVM actually changed to be
+    // provided. If a changed account is omitted from both `after_preimages` and
+    // `tree_update.entries`, its 0x8003 write never enters `writes`, the tree
+    // keeps the stale pre-state leaf, and `state_after` silently drops the
+    // debit/credit (omission attack, e.g. draining a victim without recording
+    // the balance loss). Enumerate REVM's post-state and require every account
+    // whose nonce or balance differs from its merkle-authenticated pre-state to
+    // have an after-preimage.
+    for (addr, db_account) in &cache_db.cache.accounts {
+        if matches!(
+            db_account.account_state,
+            revm::database::AccountState::None | revm::database::AccountState::NotExisting
+        ) {
+            continue;
+        }
+        // Authenticated pre-state (ProvenDB is immutable; the mutations live in
+        // the CacheDB overlay we are reading here). A same-tx create+destroy
+        // ends at nonce 0 / balance 0 with no pre-state, so it registers as
+        // unchanged and is correctly not required (mirrors evm.rs's EIP-6780
+        // handling); a pre-existing selfdestruct zeroes the balance, which is a
+        // real change and IS required.
+        let (pre_nonce, pre_balance) = proven_db
+            .basic_ref(*addr)
+            .ok()
+            .flatten()
+            .map(|info| (info.nonce, info.balance))
+            .unwrap_or((0, U256::ZERO));
+        if db_account.info.nonce != pre_nonce || db_account.info.balance != pre_balance {
+            assert!(
+                after_map.contains_key(addr),
+                "REVM changed account {addr} (nonce {pre_nonce}->{}, balance {pre_balance}->{}) \
+                 but no after-preimage was provided: its 0x8003 write would be dropped \
+                 from state_after",
+                db_account.info.nonce,
+                db_account.info.balance,
+            );
+        }
+    }
+
     writes
 }
 
@@ -114,6 +168,23 @@ pub(super) fn verify_tree_update(
 ) -> (B256, u64) {
     match meta.tree_update {
         Some(ref tree_update) => {
+            // The set-equality identity below (|A| == |B| ∧ A ⊆ B ⟹ A == B)
+            // only holds when A (the entries' keys) is a genuine SET. `entries`
+            // is a Vec with no uniqueness guarantee, so a duplicated key would
+            // inflate `.len()` to match `revm_writes.len()` while the forward
+            // pass silently drops a real write (the omitted key is never
+            // examined). Reject duplicate keys first so the count check is a
+            // true set-cardinality comparison.
+            let distinct_keys: std::collections::HashSet<B256> =
+                tree_update.entries.iter().map(|(k, _)| *k).collect();
+            assert_eq!(
+                distinct_keys.len(),
+                tree_update.entries.len(),
+                "tree_update.entries has duplicate keys ({} entries, {} distinct): \
+                 duplicates defeat the write-set completeness check",
+                tree_update.entries.len(),
+                distinct_keys.len(),
+            );
             if revm_writes.len() != tree_update.entries.len() {
                 // Name the differing keys: a bare count is undebuggable.
                 let tree_keys: std::collections::HashSet<_> =

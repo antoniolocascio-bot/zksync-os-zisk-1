@@ -70,31 +70,12 @@ pub(super) fn execute_block_proven(
         );
     }
 
-    // SOUND: L2→L1 logs are computed from REVM's EVM execution output, NOT from
-    // the untrusted BlockInput.l2_to_l1_logs. The L1Messenger precompile (0x8008)
-    // emits L1MessageSent EVM events during execution; we reconstruct the structured
-    // L2ToL1LogEntry from those events. This ensures the logs in the batch commitment
-    // match what was actually executed.
-    //
-    // Verify consistency: computed logs must match input logs. A mismatch means either
-    // the server provided wrong logs or our extraction has a bug.
-    if !block.l2_to_l1_logs.is_empty() || !computed_l2_to_l1_logs.is_empty() {
-        assert_eq!(
-            computed_l2_to_l1_logs.len(),
-            block.l2_to_l1_logs.len(),
-            "L2→L1 log count mismatch: computed {} from EVM, input has {}",
-            computed_l2_to_l1_logs.len(),
-            block.l2_to_l1_logs.len(),
-        );
-        for (i, (computed, input)) in computed_l2_to_l1_logs.iter().zip(&block.l2_to_l1_logs).enumerate() {
-            assert_eq!(
-                computed.encode(),
-                input.encode(),
-                "L2→L1 log {i} mismatch: computed {:?} != input {:?}",
-                computed, input,
-            );
-        }
-    }
+    // L2->L1 logs are computed from REVM's execution output (the L1Messenger
+    // precompile at 0x8008 emits L1MessageSent events, reconstructed into
+    // L2ToL1LogEntry), and it is those COMPUTED logs that feed the batch
+    // commitment. The witness `block.l2_to_l1_logs` is not read here: comparing
+    // it against the computed set authenticates nothing (both are guest-derived,
+    // and the commitment ignores the witness copy).
 
     (
         BlockResult {
