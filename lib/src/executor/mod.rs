@@ -80,6 +80,13 @@ fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B25
         verify::build_revm_write_map(&storage_writes, &cache_db, &meta.account_preimages_after);
     let (tree_root_after, new_leaf_count) = verify::verify_tree_update(meta, &revm_writes);
 
+    // Authenticate the historical block-hash ring against the L1-pinned
+    // `block_hashes_blake_before` before it is folded into `state_before` and
+    // carried forward (as the seed of the BLOCKHASH-visible history and of
+    // `block_hashes_blake_after`). Without this, the ring rests only on the
+    // untrusted witness.
+    verify_block_hashes_blake_before(meta, input.blocks.first().unwrap());
+
     // State before.
     let state_before = commitment::state_commitment_hash(
         &meta.tree_root_before, meta.leaf_count_before,
@@ -220,6 +227,70 @@ fn verify_intra_batch_hashes(block: &BlockInput, computed: &HashMap<u64, B256>) 
                  server={hash}, computed={expected}");
         }
     }
+}
+
+/// Authenticate the pre-batch historical block-hash ring against the L1-pinned
+/// `block_hashes_blake_before`.
+///
+/// `block_hashes_blake_before` is part of `state_before`, which L1 chains to the
+/// previous batch's `state_after`, so it is trustworthy. The ring the guest
+/// actually *uses* is the separate witness field `first_block.block_hashes`: it
+/// feeds the `BLOCKHASH` opcode (via `ProvenDB::block_hash_ref`), supplies the
+/// first block's parent hash (`evm.rs`), and is carried into
+/// `block_hashes_blake_after` / `state_after`. Nothing else ties that ring to
+/// the pinned pre-state value — the only prior check compares two witness fields
+/// (`block.block_hashes` vs `meta.previous_block_hashes`) against each other, and
+/// `verify_intra_batch_hashes` covers only blocks computed *within* the batch.
+///
+/// A malicious sequencer could therefore supply a forged-but-internally-
+/// consistent historical ring, making `BLOCKHASH(old_block)` return arbitrary
+/// values and forging the ring commitment carried forward. Reconstructing the
+/// pinned commitment from the witnessed history and asserting equality anchors
+/// the whole ring to the L1-pinned value; combined with the intra-batch checks
+/// and L1 chaining, the ring becomes authenticated end-to-end.
+pub(crate) fn verify_block_hashes_blake_before(meta: &BatchMeta, first_block: &BlockInput) {
+    let reconstructed =
+        reconstruct_block_hashes_blake_before(first_block.number, &first_block.block_hashes);
+    assert_eq!(
+        reconstructed, meta.block_hashes_blake_before,
+        "pre-state block-hash ring is not authenticated by the L1-pinned \
+         block_hashes_blake_before: reconstructed={reconstructed}, \
+         pinned={}",
+        meta.block_hashes_blake_before,
+    );
+}
+
+/// Rebuild the 256-entry pre-state block-hash ring from the first block's
+/// witnessed `BLOCKHASH` history and return its canonical Blake2s commitment,
+/// matching how the server computes `block_hashes_blake_before`.
+///
+/// The server hashes the first block's 256-entry context ring in array order
+/// (Blake2s over `ring[0] ‖ … ‖ ring[255]`) and derives `first_block.block_hashes`
+/// from that same ring via `block_number = first_block_number - (256 - index)`,
+/// dropping zero (genesis padding) and out-of-range entries. We invert that map:
+/// each witnessed `(block_number, hash)` in the pre-state window
+/// `[first-256, first-1]` is placed at `index = block_number + 256 - first`
+/// (oldest at 0, the first block's parent at 255); every other slot stays zero.
+/// Hashing the full ring via the canonical `block_hashes_blake` (the same routine
+/// that commits the "after" ring) makes the reconstruction byte-identical to the
+/// original commitment, so every honest batch — single- or multi-block, and the
+/// short early-chain ring where `block_number_before < 255` — still passes.
+pub(crate) fn reconstruct_block_hashes_blake_before(
+    first_block_number: u64,
+    first_block_hashes: &[(u64, B256)],
+) -> B256 {
+    let mut ring = [B256::ZERO; 256];
+    for &(num, hash) in first_block_hashes {
+        // Only blocks in the pre-state window [first-256, first-1] populate the
+        // ring; anything else is irrelevant to `block_hashes_blake_before`.
+        if num < first_block_number && first_block_number - num <= 256 {
+            let idx = (num + 256 - first_block_number) as usize;
+            ring[idx] = hash;
+        }
+    }
+    // Blake2s(ring[0] ‖ … ‖ ring[254] ‖ ring[255]) — identical to the server's
+    // full-ring hash and to `block_hashes_blake_after`.
+    commitment::block_hashes_blake(&ring[..255], &ring[255])
 }
 
 /// Execute a batch from bincode-serialized BatchInput bytes.
