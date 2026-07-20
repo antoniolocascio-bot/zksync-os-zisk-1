@@ -5,6 +5,7 @@
 //! a separate data path.
 
 mod evm;
+mod interop;
 mod proven_db;
 mod stream;
 pub mod tx;
@@ -229,16 +230,43 @@ fn run_execution_and_commit(
         }
     }
 
+    // Authenticate the two interop scalars instead of trusting the witness.
+    // Native reads both as storage reads of fixed system-contract slots at batch
+    // boundaries (block_flow/zk/post_tx_op::read_batch_context_inputs); the guest
+    // reproduces those reads against the server-supplied slot proofs (`interop`),
+    // so `multichain_root`/`sl_chain_id` are DERIVED, not inherited. A proof
+    // inconsistent with the pinned root fails there, rejecting a forged scalar.
+    let is_v31 = input.protocol_version_minor >= 31;
+    let (derived_multichain_root, derived_sl_chain_id) = if is_v31 {
+        let proofs = meta.interop_proofs.as_ref().expect(
+            "v31 batch is missing interop_proofs: the server must supply the \
+             sl_chain_id / multichain_root slot proofs",
+        );
+        // multichain_root: post-state read of MessageRoot 0x10005 against the
+        // in-guest-computed tree_root_after (zero unless a settlement layer).
+        let multichain_root = interop::derive_multichain_root(proofs, &tree_root_after);
+        // sl_chain_id: SystemContext 0x800b slot 0, static, read at pre-state.
+        // An upgrade batch may WRITE it this batch, making its pre-state read
+        // stale; upgrade batches are already the trusted system-write domain, so
+        // inherit the scalar there (native reads it post-state with an
+        // "if updated, matches" guard). Every non-upgrade batch is authenticated.
+        let sl_chain_id = if meta.upgrade_tx_hash.is_zero() {
+            interop::derive_sl_chain_id(&proofs.sl_chain_id, &meta.tree_root_before)
+        } else {
+            meta.sl_chain_id
+        };
+        (multichain_root, sl_chain_id)
+    } else {
+        // v30 commits neither value: multichain folds in as zero below, and
+        // sl_chain_id is absent from the v30 batch-output layout.
+        (B256::ZERO, meta.sl_chain_id)
+    };
+
     let priority_ops_hash = commitment::priority_ops_rolling_hash(&l1_tx_hashes);
     let l2_logs_local_root = commitment::l2_to_l1_logs_root(&l2_to_l1_encoded_logs);
-    // For protocol v30, multichain_root is zero in the l2_logs_root computation.
-    // For v31+, use the actual multichain_root.
-    let effective_multichain_root = if input.protocol_version_minor >= 31 {
-        meta.multichain_root
-    } else {
-        B256::ZERO
-    };
-    let l2_logs_root_hash = commitment::keccak_two(&l2_logs_local_root, &effective_multichain_root);
+    // For protocol v30, multichain_root folds in as zero (derived above); for
+    // v31+ it is the authenticated MessageRoot aggregation root.
+    let l2_logs_root_hash = commitment::keccak_two(&l2_logs_local_root, &derived_multichain_root);
 
     let da_commitment = match meta.da_commitment_scheme {
         0 | 1 => B256::ZERO,                                          // None / EmptyNoDA
@@ -265,7 +293,7 @@ fn run_execution_and_commit(
         &l2_logs_root_hash,
         &meta.upgrade_tx_hash,
         &interop_roots_rolling_hash,
-        meta.sl_chain_id,
+        derived_sl_chain_id,
     );
 
     // Top-level PI commits to the chain config (draft-0.4.0 `BatchPublicInput::hash`).

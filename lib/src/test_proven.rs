@@ -172,6 +172,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs: None,
             },
             blocks: vec![BlockInput {
                 number: 1,
@@ -294,6 +295,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs: None,
             },
             blocks: vec![BlockInput {
                 number: 1,
@@ -409,6 +411,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs: None,
             },
             blocks: vec![BlockInput {
                 number: 1,
@@ -502,6 +505,82 @@ mod tests {
         (root, leaves, siblings)
     }
 
+    /// Data leaves (index >= 2, guards excluded) of a full pre-state leaf set, in
+    /// index order, as `(key, value)` — the shape `build_dense_tree` consumes.
+    fn data_leaves_in_index_order(leaves: &[(u64, TreeLeaf)]) -> Vec<(B256, B256)> {
+        let mut v: Vec<(u64, B256, B256)> = leaves
+            .iter()
+            .filter(|(i, _)| *i >= 2)
+            .map(|(i, l)| (*i, l.key, l.value))
+            .collect();
+        v.sort_by_key(|(i, _, _)| *i);
+        v.into_iter().map(|(_, k, val)| (k, val)).collect()
+    }
+
+    /// Apply a `BatchTreeUpdate` to its pre-state leaf set and return the
+    /// post-state data leaves (index >= 2) in index order. Mirrors the guest's
+    /// `apply_writes` index assignment: updates keep their index; inserts take
+    /// dense indices from `leaf_count_before`.
+    fn post_state_data(update: &BatchTreeUpdate) -> Vec<(B256, B256)> {
+        use std::collections::BTreeMap;
+        let mut by_index: BTreeMap<u64, (B256, B256)> = update
+            .sorted_leaves
+            .iter()
+            .map(|(i, l)| (*i, (l.key, l.value)))
+            .collect();
+        let mut next_index = update.leaf_count_before;
+        for (op, (key, val)) in update.operations.iter().zip(&update.entries) {
+            match op {
+                WriteOp::Update { index } => {
+                    by_index.get_mut(index).expect("update target present").1 = *val;
+                }
+                WriteOp::Insert { .. } => {
+                    by_index.insert(next_index, (*key, *val));
+                    next_index += 1;
+                }
+            }
+        }
+        by_index
+            .into_iter()
+            .filter(|(i, _)| *i >= 2)
+            .map(|(_, kv)| kv)
+            .collect()
+    }
+
+    /// Interop slot keys (guest-visible flat keys) for a non-settlement chain.
+    fn interop_slot_keys() -> (B256, B256, B256) {
+        const SYSTEM_CONTEXT_ADDR: [u8; 20] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x0b,
+        ];
+        const MESSAGE_ROOT_ADDR: [u8; 20] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x05,
+        ];
+        let sl_key = derive_flat_storage_key(&SYSTEM_CONTEXT_ADDR, &B256::ZERO);
+        let height_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDR, &B256::with_last_byte(0x04));
+        // nodes[0][0] slot = keccak256(keccak256(word(0x06))) (height 0).
+        let base = crate::hash::keccak256(B256::with_last_byte(0x06).as_slice());
+        let root_slot = crate::hash::keccak256(base.as_slice());
+        let root_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDR, &root_slot);
+        (sl_key, height_key, root_key)
+    }
+
+    /// Build the three NonExisting interop slot proofs for a NON-settlement-layer
+    /// v31 batch (derives `sl_chain_id` 0, `multichain_root` 0): sl_chain_id
+    /// against the pre-state tree, multichain height+root against the post-state
+    /// tree. Both trees are rebuilt from the `tree_update`, so their roots equal
+    /// the guest's `tree_root_before` / `tree_root_after`.
+    fn interop_proofs_nonsettlement(update: &BatchTreeUpdate) -> InteropSlotProofs {
+        let (_pre_root, pre_leaves, pre_sib) =
+            build_dense_tree(&data_leaves_in_index_order(&update.sorted_leaves));
+        let (_post_root, post_leaves, post_sib) = build_dense_tree(&post_state_data(update));
+        let (sl_key, height_key, root_key) = interop_slot_keys();
+        InteropSlotProofs {
+            sl_chain_id: non_existence_proof(&pre_leaves, &pre_sib, &sl_key),
+            multichain_height: non_existence_proof(&post_leaves, &post_sib, &height_key),
+            multichain_root: non_existence_proof(&post_leaves, &post_sib, &root_key),
+        }
+    }
+
     /// Production fee semantics: the operator (coinbase) is credited the FULL
     /// effective gas price per unit of gas used. Production zksync-os is built
     /// WITHOUT the `burn_base_fee` cargo feature (the server pins
@@ -589,6 +668,7 @@ mod tests {
                 intermediate_hashes: vec![],
                 leaf_count_before: 4,
             };
+            let interop_proofs = Some(interop_proofs_nonsettlement(&tree_update));
             BatchInput {
                 version: crate::types::BATCH_INPUT_VERSION,
                 chain_id: 1,
@@ -614,6 +694,7 @@ mod tests {
                     ],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    interop_proofs,
                 },
                 blocks: vec![BlockInput {
                     number: 1,
@@ -760,6 +841,14 @@ mod tests {
         bytecodes: Vec<(B256, Vec<u8>)>,
     ) -> BatchInput {
         let leaf_count = sorted_leaves.len() as u64;
+        let tree_update = BatchTreeUpdate {
+            operations,
+            entries,
+            sorted_leaves,
+            intermediate_hashes: vec![],
+            leaf_count_before: leaf_count,
+        };
+        let interop_proofs = Some(interop_proofs_nonsettlement(&tree_update));
         BatchInput {
             version: crate::types::BATCH_INPUT_VERSION,
             chain_id: 1,
@@ -778,16 +867,11 @@ mod tests {
                 multichain_root: B256::ZERO,
                 sl_chain_id: 1,
                 blob_versioned_hashes: vec![],
-                tree_update: Some(BatchTreeUpdate {
-                    operations,
-                    entries,
-                    sorted_leaves,
-                    intermediate_hashes: vec![],
-                    leaf_count_before: leaf_count,
-                }),
+                tree_update: Some(tree_update),
                 account_preimages_after,
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs,
             },
             blocks: vec![block],
             bytecodes,
@@ -1131,6 +1215,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
                     number: FIRST,
@@ -1358,6 +1443,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_bh), mk_block(LAST, second_bh)],
                 bytecodes: vec![],
@@ -1576,6 +1662,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_block_hashes.clone()), mk_block(LAST, second_bh)],
                 bytecodes: vec![],
@@ -1732,6 +1819,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
                     number: N,
@@ -1849,6 +1937,18 @@ mod tests {
         let sender_after = encode_account_props(1, sender_balance_before - fee);
         let coinbase_after = encode_account_props(0, coinbase_balance_before + fee);
 
+        let tree_update = BatchTreeUpdate {
+            operations: vec![WriteOp::Update { index: 2 }, WriteOp::Update { index: 3 }],
+            entries: vec![
+                (k_sender, AccountProperties::hash(&sender_after)),
+                (k_coinbase, AccountProperties::hash(&coinbase_after)),
+            ],
+            sorted_leaves: leaves.clone(),
+            intermediate_hashes: vec![],
+            leaf_count_before: 4,
+        };
+        let interop_proofs = Some(interop_proofs_nonsettlement(&tree_update));
+
         let batch = BatchInput {
             version: crate::types::BATCH_INPUT_VERSION,
             chain_id: 1,
@@ -1867,22 +1967,14 @@ mod tests {
                 multichain_root: B256::ZERO,
                 sl_chain_id: 1,
                 blob_versioned_hashes: vec![],
-                tree_update: Some(BatchTreeUpdate {
-                    operations: vec![WriteOp::Update { index: 2 }, WriteOp::Update { index: 3 }],
-                    entries: vec![
-                        (k_sender, AccountProperties::hash(&sender_after)),
-                        (k_coinbase, AccountProperties::hash(&coinbase_after)),
-                    ],
-                    sorted_leaves: leaves.clone(),
-                    intermediate_hashes: vec![],
-                    leaf_count_before: 4,
-                }),
+                tree_update: Some(tree_update),
                 account_preimages_after: vec![
                     (sender, sender_after.clone()),
                     (coinbase, coinbase_after.clone()),
                 ],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs,
             },
             blocks: vec![BlockInput {
                 number: 1,
@@ -1910,6 +2002,166 @@ mod tests {
             bytecodes: vec![],
         };
         (batch, sender, coinbase, k_sender, k_coinbase, sender_after, coinbase_after)
+    }
+
+    // ================= W2.4: interop-scalar derivation (A/B) =================
+
+    /// A/B (non-settlement layer): the guest now DERIVES `sl_chain_id` and
+    /// `multichain_root` from the authenticated slot proofs, so the witness
+    /// SCALARS no longer feed the commitment. Forging either scalar must leave
+    /// the commitment byte-identical (proof that they are no longer trusted),
+    /// and this equals "today's" commitment because the derived values (0, 0)
+    /// match what a non-settlement chain's scalars held.
+    #[test]
+    fn interop_scalars_not_trusted_and_commitment_stable() {
+        let (honest, ..) = w2_honest_transfer_batch();
+        let (_o, c_honest) = executor::execute_and_commit(&honest);
+
+        // Forge BOTH witness scalars; the commitment must be unchanged.
+        let mut scalar_forged = honest.clone();
+        scalar_forged.batch_meta.sl_chain_id = 0xdead_beef;
+        scalar_forged.batch_meta.multichain_root = B256::repeat_byte(0xAB);
+        let (_o2, c_forged) = executor::execute_and_commit(&scalar_forged);
+        assert_eq!(
+            c_honest, c_forged,
+            "interop witness scalars must not affect the commitment (now derived from proofs)"
+        );
+    }
+
+    /// A forged interop PROOF (value inconsistent with the pinned tree root) is
+    /// rejected end to end — the derived scalar rests on the merkle proof, not
+    /// on trust.
+    #[test]
+    fn interop_forged_slot_proof_rejected() {
+        let (honest, ..) = w2_honest_transfer_batch();
+
+        // Corrupt the sl_chain_id proof so its neighbors recover different roots.
+        let mut sl_forged = honest.clone();
+        if let Some(p) = sl_forged.batch_meta.interop_proofs.as_mut() {
+            if let StorageProof::NonExisting { left_neighbor, .. } = &mut p.sl_chain_id {
+                left_neighbor.entry.value = B256::repeat_byte(0x99);
+            }
+        }
+        assert!(
+            std::panic::catch_unwind(|| executor::execute_and_commit(&sl_forged)).is_err(),
+            "a forged sl_chain_id slot proof must be rejected"
+        );
+
+        // Corrupt the multichain-root proof likewise.
+        let mut mc_forged = honest.clone();
+        if let Some(p) = mc_forged.batch_meta.interop_proofs.as_mut() {
+            if let StorageProof::NonExisting { left_neighbor, .. } = &mut p.multichain_root {
+                left_neighbor.entry.value = B256::repeat_byte(0x99);
+            }
+        }
+        assert!(
+            std::panic::catch_unwind(|| executor::execute_and_commit(&mc_forged)).is_err(),
+            "a forged multichain_root slot proof must be rejected"
+        );
+    }
+
+    /// A/B (settlement layer): a v31 batch whose post-state tree holds the
+    /// MessageRoot `0x10005` aggregation slots (height `H`, `nodes[H][0]=R`)
+    /// derives `multichain_root = R`. The scalar is again irrelevant: forging it
+    /// leaves the commitment unchanged, and dropping the aggregation root from
+    /// the tree changes the commitment (so the derived value genuinely feeds it).
+    #[test]
+    fn interop_settlement_layer_multichain_derived_from_slots() {
+        // A no-write batch: one empty block, tree_update None, so
+        // tree_root_after == tree_root_before. The pre-state tree carries the
+        // 0x10005 aggregation slots plus the block's coinbase account.
+        let coinbase: Address = "0x00000000000000000000000000000000c01badde".parse().unwrap();
+        let coinbase_props = encode_account_props(0, U256::from(5u64));
+        let k_coinbase = derive_account_properties_key(&coinbase.into_array());
+
+        const MESSAGE_ROOT_ADDR: [u8; 20] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x05,
+        ];
+        let height = B256::with_last_byte(4);
+        let agg_root = B256::repeat_byte(0xC3);
+        let height_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDR, &B256::with_last_byte(0x04));
+        // nodes[4][0] slot = keccak256( keccak256(word(0x06)) + 4 ).
+        let base = U256::from_be_bytes(
+            crate::hash::keccak256(B256::with_last_byte(0x06).as_slice()).0,
+        );
+        let node_slot_word = base.wrapping_add(U256::from(4u64));
+        let root_slot = crate::hash::keccak256(&node_slot_word.to_be_bytes::<32>());
+        let root_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDR, &root_slot);
+
+        let (root, leaves, siblings) = build_dense_tree(&[
+            (k_coinbase, AccountProperties::hash(&coinbase_props)),
+            (height_key, height),
+            (root_key, agg_root),
+        ]);
+        let existing_for = |key: &B256| -> StorageProof {
+            let (i, leaf) = leaves.iter().find(|(_, l)| l.key == *key).unwrap();
+            StorageProof::Existing(SlotProofEntry {
+                index: *i,
+                value: leaf.value,
+                next_index: leaf.next_index,
+                siblings: siblings[*i as usize].clone(),
+            })
+        };
+        let (sl_key, _, _) = interop_slot_keys();
+
+        let build = |scalar_multichain: B256| -> BatchInput {
+            BatchInput {
+                version: crate::types::BATCH_INPUT_VERSION,
+                chain_id: 1,
+                spec_id: 2,
+                protocol_version_minor: 31,
+                batch_meta: BatchMeta {
+                    tree_root_before: root,
+                    leaf_count_before: leaves.len() as u64,
+                    block_number_before: 0,
+                    last_block_timestamp_before: 0,
+                    block_hashes_blake_before: empty_ring_blake(),
+                    previous_block_hashes: vec![],
+                    upgrade_tx_hash: B256::ZERO,
+                    da_commitment_scheme: 2,
+                    pubdata: vec![],
+                    multichain_root: scalar_multichain,
+                    sl_chain_id: 7,
+                    blob_versioned_hashes: vec![],
+                    tree_update: None,
+                    account_preimages_after: vec![],
+                    fri_proof_verification_enabled: false,
+                    max_tx_gas_limit: 1 << 24,
+                    interop_proofs: Some(InteropSlotProofs {
+                        // No writes => tree_root_after == tree_root_before, so all
+                        // three proofs verify against `root`.
+                        sl_chain_id: non_existence_proof(&leaves, &siblings, &sl_key),
+                        multichain_height: existing_for(&height_key),
+                        multichain_root: existing_for(&root_key),
+                    }),
+                },
+                blocks: vec![BlockInput {
+                    number: 1,
+                    timestamp: 1700000000,
+                    base_fee: 7,
+                    gas_limit: 1_000_000,
+                    coinbase,
+                    prev_randao: B256::from([1u8; 32]),
+                    block_header_hash: B256::ZERO,
+                    storage_proofs: vec![(k_coinbase, existing_for(&k_coinbase))],
+                    account_preimages: vec![(coinbase, coinbase_props.clone())],
+                    transactions: vec![],
+                    block_hashes: vec![],
+                    l2_to_l1_logs: vec![],
+                    expected_tree_root: B256::ZERO,
+                }],
+                bytecodes: vec![],
+            }
+        };
+
+        // Honest and scalar-forged batches produce the SAME commitment: the
+        // multichain root is derived from the proven slot, not the scalar.
+        let (_o, c_zero_scalar) = executor::execute_and_commit(&build(B256::ZERO));
+        let (_o2, c_bogus_scalar) = executor::execute_and_commit(&build(B256::repeat_byte(0x11)));
+        assert_eq!(
+            c_zero_scalar, c_bogus_scalar,
+            "settlement-layer multichain_root is derived, not taken from the scalar"
+        );
     }
 
     /// W2.1 — a duplicated `tree_update.entries` key inflates `.len()` to match
@@ -2072,6 +2324,7 @@ mod tests {
                 account_preimages_after: vec![(fd, fd_after.clone())],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs: None,
             },
             blocks: vec![BlockInput {
                 number: 1,
@@ -2198,6 +2451,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                interop_proofs: None,
             },
             blocks: vec![BlockInput {
                 number: 1,

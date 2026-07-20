@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 
 /// Current `BatchInput` wire-format version.
 ///
+/// **v3**: adds `BatchMeta.interop_proofs` — authenticated storage proofs that
+/// let the guest DERIVE `sl_chain_id` (SystemContext `0x800b` slot 0, pre-state)
+/// and `multichain_root` (MessageRoot `0x10005` aggregation slots, post-state)
+/// instead of trusting the witness scalars. See `executor::interop`.
+///
 /// **v2**: adds `TxAuth::System` (system transactions — interop
 /// root imports, SL-chain-id updates, interop fee updates — carried as their
 /// EIP-2718 encoding and authenticated by `keccak256(encoded) == tx_hash`).
@@ -21,9 +26,37 @@ use serde::{Deserialize, Serialize};
 /// does not understand before touching the rest of the payload, so a skew
 /// fails with a named error instead of a positional misparse. A version bump
 /// implies a guest rebuild and therefore a VK rotation.
-pub const BATCH_INPUT_VERSION: u32 = 2;
+pub const BATCH_INPUT_VERSION: u32 = 3;
 
 use crate::merkle::{BatchTreeUpdate, StorageProof};
+
+/// Authenticated storage proofs for the interop-derived batch scalars.
+///
+/// Native zksync-os obtains `multichain_root` and `sl_chain_id` as authenticated
+/// storage reads of fixed system-contract slots at batch boundaries, NOT as
+/// functions of the batch's own logs (see
+/// `basic_bootloader block_flow/zk/post_tx_op` `read_batch_context_inputs`). The
+/// guest's `ProvenDB` only serves slots the server proved during execution, so
+/// these three proofs are supplied explicitly and the guest reproduces the
+/// native reads in `executor::interop`, replacing the untrusted witness scalars.
+///
+/// Present (required) for v31+ batches; `None` for v30 (which uses neither
+/// value in its commitment).
+#[derive(Serialize, Deserialize, Clone)]
+pub struct InteropSlotProofs {
+    /// Proof of SystemContext (`0x800b`) slot 0 — the settlement-layer chain id
+    /// — against `tree_root_before` (the value is static, written once at v31
+    /// activation). `Existing` ⇒ the stored chain id; `NonExisting` ⇒ 0.
+    pub sl_chain_id: StorageProof,
+    /// Proof of MessageRoot (`0x10005`) slot `0x04` — the aggregation-tree
+    /// height — against `tree_root_after`. `NonExisting` ⇒ height 0.
+    pub multichain_height: StorageProof,
+    /// Proof of MessageRoot (`0x10005`) slot `nodes[height][0]` — the multichain
+    /// root — against `tree_root_after`. The slot is derived in-guest from the
+    /// height read above; `NonExisting` ⇒ root 0 (chain is not a settlement
+    /// layer).
+    pub multichain_root: StorageProof,
+}
 
 /// Complete batch input for the ZiSK guest.
 #[derive(Serialize, Deserialize, Clone)]
@@ -69,8 +102,15 @@ pub struct BatchMeta {
     /// Raw pubdata bytes for DA commitment computation.
     pub pubdata: Vec<u8>,
     /// Multichain root for L2 logs tree (zero for v30).
+    ///
+    /// Legacy witness scalar. For v31+ the guest no longer trusts this value;
+    /// it derives the authoritative multichain root from `interop_proofs`
+    /// (`executor::interop`). Retained on the wire for the server's own use.
     pub multichain_root: B256,
     /// Settlement layer chain ID (for v31+).
+    ///
+    /// Legacy witness scalar. For v31+ non-upgrade batches the guest derives the
+    /// authoritative value from `interop_proofs` instead of trusting this field.
     pub sl_chain_id: u64,
     /// Blob versioned hashes for BlobsZKsyncOS DA mode (scheme=4).
     /// The host computes KZG commitments of the pubdata blobs and derives
@@ -92,6 +132,9 @@ pub struct BatchMeta {
     /// present in the batch; `chain_id` is taken from `BatchInput::chain_id`.
     pub fri_proof_verification_enabled: bool,
     pub max_tx_gas_limit: u64,
+    /// Authenticated proofs for the interop-derived scalars (`sl_chain_id`,
+    /// `multichain_root`). Required for v31+ batches; `None` for v30.
+    pub interop_proofs: Option<InteropSlotProofs>,
 }
 
 /// Single block input with pre-state and transactions.
