@@ -3412,4 +3412,434 @@ mod tests {
              first-match over the witness block_hashes"
         );
     }
+
+    // ================= AtlasV4 =================
+
+    /// How the EIP-2935 history contract appears in an AtlasV4 batch's
+    /// pre-state.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum History {
+        /// The witness carries no proof for the account at all.
+        Unproven,
+        /// A proven-absent account.
+        Absent,
+        /// An account that holds no code.
+        NoCode,
+        /// An EIP-7702 delegation designator, which `is_contract()` rejects.
+        Delegated,
+        /// A deployed contract whose ring slot is empty.
+        Contract,
+        /// A deployed contract whose ring slot already holds this block's
+        /// parent hash.
+        ContractSlotAlreadySet,
+    }
+
+    /// The EIP-2935 history contract.
+    fn history_address() -> Address {
+        "0x0000f90827f1c53a10cb7a02335b175320002935".parse().unwrap()
+    }
+
+    /// The parent hash of the AtlasV4 fixture's only block. Non-zero, so the
+    /// EIP-2935 write is a real state change.
+    fn atlas_v4_parent_hash() -> B256 {
+        B256::repeat_byte(0x77)
+    }
+
+    /// A one-block AtlasV4 batch: block 6 runs one legacy self-transfer that
+    /// debits the sender a 21000 * 10 gas fee and credits the coinbase. The
+    /// pre-state block-hash ring carries the parent of block 6, so the EIP-2935
+    /// write has a non-zero value to store.
+    ///
+    /// The `history` argument selects how the EIP-2935 history contract appears
+    /// in the pre-state, and the `tree_update` follows: only the `Contract` case
+    /// adds the ring-slot leaf.
+    fn atlas_v4_transfer_batch(history: History) -> BatchInput {
+        use blake2::{Blake2s256, Digest};
+
+        const GAS_PRICE: u64 = 10;
+        const GAS_USED: u64 = 21_000;
+        const BLOCK_NUMBER: u64 = 6;
+        const TIMESTAMP: u64 = 1_700_000_000;
+        const BLOCK_GAS_LIMIT: u64 = 1_000_000;
+        const BASE_FEE: u64 = 7;
+        const HISTORY_SERVE_WINDOW: u64 = 8191;
+
+        let parent_hash = atlas_v4_parent_hash();
+        let history_addr = history_address();
+        let sender_balance_before = U256::from(1_000_000_000_000_000_000u128);
+        let coinbase_balance_before = U256::from(5u64);
+        let fee = U256::from(GAS_USED) * U256::from(GAS_PRICE as u128);
+
+        let (sender, _) = sign_legacy([0x42u8; 32], 0, Address::ZERO, vec![], 100_000);
+        let (_, signed_bytes) = sign_legacy([0x42u8; 32], 0, sender, vec![], 100_000);
+        let coinbase: Address =
+            "0x00000000000000000000000000000000c01badde".parse().unwrap();
+
+        let sender_props = encode_account_props(0, sender_balance_before);
+        let coinbase_props = encode_account_props(0, coinbase_balance_before);
+        let k_sender = derive_account_properties_key(&sender.into_array());
+        let k_coinbase = derive_account_properties_key(&coinbase.into_array());
+        let k_history = derive_account_properties_key(&history_addr.into_array());
+        let slot_index = (BLOCK_NUMBER - 1) % HISTORY_SERVE_WINDOW;
+        let slot_key = derive_flat_storage_key(
+            &history_addr.into_array(),
+            &B256::from(U256::from(slot_index).to_be_bytes::<32>()),
+        );
+
+        let history_props = match history {
+            History::Unproven | History::Absent => None,
+            History::NoCode => Some(encode_account_props(1, U256::ZERO)),
+            History::Delegated => {
+                let mut designator =
+                    crate::account_props::EIP7702_DELEGATION_MARKER.to_vec();
+                designator.extend_from_slice(&[0x33u8; 20]);
+                Some(encode_account_props_code(1, U256::ZERO, &designator))
+            }
+            History::Contract | History::ContractSlotAlreadySet => {
+                Some(encode_account_props_code(1, U256::ZERO, &[0x5b, 0x00]))
+            }
+        };
+
+        // Pre-state leaves, in the index order `build_dense_tree` assigns from 2.
+        let mut pre_data = vec![
+            (k_sender, AccountProperties::hash(&sender_props)),
+            (k_coinbase, AccountProperties::hash(&coinbase_props)),
+        ];
+        if let Some(props) = &history_props {
+            pre_data.push((k_history, AccountProperties::hash(props)));
+        }
+        if history == History::ContractSlotAlreadySet {
+            pre_data.push((slot_key, parent_hash));
+        }
+        let leaf_count_before = 2 + pre_data.len() as u64;
+        let (root, leaves, siblings) = build_dense_tree(&pre_data);
+        let proof_for = |idx: usize| -> StorageProof {
+            let (i, leaf) = &leaves[idx];
+            StorageProof::Existing(SlotProofEntry {
+                index: *i,
+                value: leaf.value,
+                next_index: leaf.next_index,
+                siblings: siblings[idx].clone(),
+            })
+        };
+
+        let sender_after = encode_account_props(1, sender_balance_before - fee);
+        let coinbase_after = encode_account_props(0, coinbase_balance_before + fee);
+
+        let mut operations = vec![WriteOp::Update { index: 2 }, WriteOp::Update { index: 3 }];
+        let mut entries = vec![
+            (k_sender, AccountProperties::hash(&sender_after)),
+            (k_coinbase, AccountProperties::hash(&coinbase_after)),
+        ];
+        if history == History::Contract {
+            let prev_index = leaves
+                .iter()
+                .filter(|(_, l)| l.key < slot_key)
+                .max_by_key(|(_, l)| l.key)
+                .unwrap()
+                .0;
+            operations.push(WriteOp::Insert { prev_index });
+            entries.push((slot_key, parent_hash));
+        }
+        let tree_update = BatchTreeUpdate {
+            operations,
+            entries,
+            sorted_leaves: leaves.clone(),
+            intermediate_hashes: vec![],
+            leaf_count_before,
+        };
+        let interop_proofs = Some(interop_proofs_nonsettlement(&tree_update));
+
+        // The block's storage proofs: the two executed accounts, plus whatever
+        // the EIP-2935 step reads.
+        // Leaf index 0 is the MIN guard and 1 the MAX guard, so the pre-state
+        // data leaves start at 2 in the order `pre_data` lists them.
+        let mut storage_proofs = vec![(k_sender, proof_for(2)), (k_coinbase, proof_for(3))];
+        match history {
+            History::Unproven => {}
+            History::Absent => {
+                storage_proofs.push((
+                    k_history,
+                    non_existence_proof(&leaves, &siblings, &k_history),
+                ));
+            }
+            History::NoCode | History::Delegated => {
+                storage_proofs.push((k_history, proof_for(4)));
+            }
+            History::Contract => {
+                storage_proofs.push((k_history, proof_for(4)));
+                storage_proofs
+                    .push((slot_key, non_existence_proof(&leaves, &siblings, &slot_key)));
+            }
+            History::ContractSlotAlreadySet => {
+                storage_proofs.push((k_history, proof_for(4)));
+                storage_proofs.push((slot_key, proof_for(5)));
+            }
+        }
+
+        let mut account_preimages = vec![
+            (sender, sender_props.clone()),
+            (coinbase, coinbase_props.clone()),
+        ];
+        if let Some(props) = history_props {
+            account_preimages.push((history_addr, props));
+        }
+
+        // The pre-state ring holds the parent of block 6 at its owner-parent
+        // slot; every other slot is empty.
+        let mut ring = [B256::ZERO; 256];
+        ring[255] = parent_hash;
+        let mut ring_hasher = Blake2s256::new();
+        for hash in &ring[..255] {
+            ring_hasher.update(hash.as_slice());
+        }
+        ring_hasher.update(ring[255].as_slice());
+        let block_hashes_blake_before = B256::from_slice(&ring_hasher.finalize());
+
+        // The sealed header hash, derived from the two AtlasV4 Merkle roots. A
+        // guest that kept the keccak rolling hash produces a different value.
+        let tx_hash = crate::hash::keccak256(&signed_bytes);
+        let receipt = crate::block_roots::receipt_leaf(0, true, GAS_USED, &[]);
+        let block_header_hash = crate::block_header::compute_block_header_hash(
+            &parent_hash,
+            &coinbase.into_array(),
+            &crate::block_roots::block_tx_tree_root(&[tx_hash]),
+            &crate::block_roots::block_tx_tree_root(&[receipt]),
+            BLOCK_NUMBER,
+            BLOCK_GAS_LIMIT,
+            GAS_USED,
+            TIMESTAMP,
+            &B256::from([1u8; 32]),
+            BASE_FEE,
+        );
+
+        BatchInput {
+            version: crate::types::BATCH_INPUT_VERSION,
+            chain_id: 1,
+            spec_id: 3,
+            protocol_version_minor: 32,
+            batch_meta: BatchMeta {
+                tree_root_before: root,
+                leaf_count_before,
+                block_number_before: BLOCK_NUMBER - 1,
+                last_block_timestamp_before: 0,
+                block_hashes_blake_before,
+                previous_block_hashes: vec![],
+                upgrade_tx_hash: B256::ZERO,
+                da_commitment_scheme: 2,
+                pubdata: vec![],
+                multichain_root: B256::ZERO,
+                sl_chain_id: 0,
+                blob_versioned_hashes: vec![],
+                tree_update: Some(tree_update),
+                account_preimages_after: vec![
+                    (sender, sender_after),
+                    (coinbase, coinbase_after),
+                ],
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+                interop_proofs,
+            },
+            blocks: vec![BlockInput {
+                number: BLOCK_NUMBER,
+                timestamp: TIMESTAMP,
+                base_fee: BASE_FEE,
+                gas_limit: BLOCK_GAS_LIMIT,
+                coinbase,
+                prev_randao: B256::from([1u8; 32]),
+                block_header_hash,
+                storage_proofs,
+                account_preimages,
+                transactions: vec![TxInput {
+                    chain_id: Some(1),
+                    gas_used_override: Some(GAS_USED),
+                    force_fail: false,
+                    auth: TxAuth::L2 { signed_bytes },
+                }],
+                block_hashes: vec![(BLOCK_NUMBER - 1, parent_hash)],
+                l2_to_l1_logs: vec![],
+                expected_tree_root: B256::ZERO,
+            }],
+            bytecodes: vec![],
+        }
+    }
+
+    /// An AtlasV4 block commits the two depth-32 Blake2s Merkle roots. The
+    /// fixture's sealed header hash is built from those roots, so the executor's
+    /// own header check pins the choice; this test additionally shows the
+    /// AtlasV3 rolling-hash header is a different value, so the check is not
+    /// passing by accident.
+    #[test]
+    fn atlas_v4_block_commits_the_merkle_roots() {
+        let batch = atlas_v4_transfer_batch(History::Contract);
+        let (output, commitment) = executor::execute_and_commit(&batch);
+        assert_ne!(commitment, B256::ZERO);
+
+        let block = &batch.blocks[0];
+        let computed = output.block_results[0].computed_block_header_hash;
+        assert_eq!(computed, block.block_header_hash);
+
+        let tx_hash = output.block_results[0].tx_results.len();
+        assert_eq!(tx_hash, 1, "the fixture runs exactly one transaction");
+
+        let rolling = crate::block_header::compute_block_header_hash(
+            &atlas_v4_parent_hash(),
+            &block.coinbase.into_array(),
+            &crate::block_header::transactions_rolling_hash(
+                &[crate::hash::keccak256(match &block.transactions[0].auth {
+                    TxAuth::L2 { signed_bytes } => signed_bytes,
+                    _ => unreachable!("the fixture carries one L2 transaction"),
+                })],
+                crate::block_header::KECCAK_EMPTY,
+            ),
+            &B256::ZERO,
+            block.number,
+            block.gas_limit,
+            21_000,
+            block.timestamp,
+            &block.prev_randao,
+            block.base_fee,
+        );
+        assert_ne!(
+            computed, rolling,
+            "an AtlasV4 header must not carry the keccak rolling hash and a zero \
+             receipts root"
+        );
+    }
+
+    /// The EIP-2935 write puts the block's parent hash into ring slot
+    /// `(number - 1) % 8191`, and it enters the batch write set. Dropping the
+    /// leaf from the tree update makes the batch unprovable, which shows the
+    /// write really reaches `tree_root_after`.
+    #[test]
+    fn atlas_v4_writes_the_parent_hash_into_the_history_slot() {
+        let batch = atlas_v4_transfer_batch(History::Contract);
+        let update = batch.batch_meta.tree_update.as_ref().unwrap();
+        let slot_key = derive_flat_storage_key(
+            &history_address().into_array(),
+            &B256::from(U256::from(5u64).to_be_bytes::<32>()),
+        );
+        assert!(
+            update.entries.contains(&(slot_key, atlas_v4_parent_hash())),
+            "the fixture's tree update must carry the ring-slot write"
+        );
+        let (_output, commitment) = executor::execute_and_commit(&batch);
+        assert_ne!(commitment, B256::ZERO);
+
+        let mut without_write = batch.clone();
+        let update = without_write.batch_meta.tree_update.as_mut().unwrap();
+        update.operations.pop();
+        update.entries.pop();
+        assert!(
+            std::panic::catch_unwind(|| executor::execute_and_commit(&without_write)).is_err(),
+            "a tree update missing the EIP-2935 write must be rejected"
+        );
+    }
+
+    /// Native returns without writing when the history account is not a
+    /// contract: an absent account, an account with no code, and an EIP-7702
+    /// delegation designator all skip the write.
+    #[test]
+    fn atlas_v4_skips_the_history_write_when_the_account_is_not_a_contract() {
+        for history in [History::Absent, History::NoCode, History::Delegated] {
+            let batch = atlas_v4_transfer_batch(history);
+            let update = batch.batch_meta.tree_update.as_ref().unwrap();
+            assert_eq!(
+                update.entries.len(),
+                2,
+                "only the two executed accounts change"
+            );
+            let (_output, commitment) = executor::execute_and_commit(&batch);
+            assert_ne!(commitment, B256::ZERO);
+        }
+    }
+
+    /// The write joins the batch write set only when it changes the slot. A ring
+    /// slot that already holds this block's parent hash contributes nothing.
+    #[test]
+    fn atlas_v4_skips_the_history_write_when_the_slot_already_holds_the_value() {
+        let batch = atlas_v4_transfer_batch(History::ContractSlotAlreadySet);
+        assert_eq!(batch.batch_meta.tree_update.as_ref().unwrap().entries.len(), 2);
+        let (_output, commitment) = executor::execute_and_commit(&batch);
+        assert_ne!(commitment, B256::ZERO);
+    }
+
+    /// The `is_contract()` gate decides whether the batch writes a state change,
+    /// so it must rest on an authenticated pre-state. A witness that omits the
+    /// history contract's proof is rejected with a named error.
+    #[test]
+    #[should_panic(expected = "carries no authenticated pre-state for the")]
+    fn atlas_v4_requires_the_history_contract_pre_state() {
+        executor::execute_and_commit(&atlas_v4_transfer_batch(History::Unproven));
+    }
+
+    /// The ring slot's own pre-state must be authenticated too: the write joins
+    /// the write set only when it differs from that value.
+    #[test]
+    #[should_panic(expected = "carries no authenticated pre-state for the")]
+    fn atlas_v4_requires_the_history_slot_pre_state() {
+        let mut batch = atlas_v4_transfer_batch(History::Contract);
+        let slot_key = derive_flat_storage_key(
+            &history_address().into_array(),
+            &B256::from(U256::from(5u64).to_be_bytes::<32>()),
+        );
+        batch.blocks[0].storage_proofs.retain(|(k, _)| *k != slot_key);
+        executor::execute_and_commit(&batch);
+    }
+
+    /// The sealed header hash is mandatory at AtlasV4: it is the only check that
+    /// ties the Merkle tree leaves to the block native sealed.
+    #[test]
+    #[should_panic(expected = "must carry the sealed block_header_hash")]
+    fn atlas_v4_requires_a_sealed_block_header_hash() {
+        let mut batch = atlas_v4_transfer_batch(History::Contract);
+        batch.blocks[0].block_header_hash = B256::ZERO;
+        executor::execute_and_commit(&batch);
+    }
+
+    /// Native's transaction dispatch compiles no type-3 arm in any shipped
+    /// build, so an AtlasV4 batch carrying a blob transaction is rejected.
+    #[test]
+    #[should_panic(expected = "blob transactions are not enabled at AtlasV4")]
+    fn atlas_v4_rejects_blob_transactions() {
+        use alloy_consensus::{SignableTransaction, TxEip4844, TxEip4844Variant, TxEnvelope};
+        use alloy_eips::eip2718::Encodable2718;
+        use k256::ecdsa::SigningKey;
+
+        let sk = SigningKey::from_bytes((&[0x42u8; 32]).into()).unwrap();
+        let tx = TxEip4844 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 10,
+            max_priority_fee_per_gas: 0,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes: vec![B256::repeat_byte(0x01)],
+            max_fee_per_blob_gas: 1,
+            input: Default::default(),
+        };
+        let sighash = tx.signature_hash();
+        let (sig, recid) = sk.sign_prehash_recoverable(sighash.as_slice()).unwrap();
+        let sig_bytes = sig.to_bytes();
+        let signature = alloy_primitives::Signature::new(
+            U256::from_be_slice(&sig_bytes[..32]),
+            U256::from_be_slice(&sig_bytes[32..]),
+            recid.is_y_odd(),
+        );
+        let envelope =
+            TxEnvelope::Eip4844(TxEip4844Variant::TxEip4844(tx).into_signed(signature));
+        let mut signed = Vec::new();
+        envelope.encode_2718(&mut signed);
+
+        let mut batch = atlas_v4_transfer_batch(History::Contract);
+        batch.blocks[0].transactions.push(TxInput {
+            chain_id: Some(1),
+            gas_used_override: Some(0),
+            force_fail: true,
+            auth: TxAuth::L2 { signed_bytes: signed },
+        });
+        executor::execute_and_commit(&batch);
+    }
 }
