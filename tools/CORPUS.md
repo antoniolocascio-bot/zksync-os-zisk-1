@@ -60,7 +60,7 @@ input.bin ──▶ ziskemu + guest ELF ──▶ clean exit or attributed panic
 6. **Environment overrides** — every location the runner uses is an env var
    (see the header of `corpus-emu.sh`): `ZKOS_DUMP_WORKTREE`,
    `ZKOS_FIXTURES`, `ZISK_TESTUTILS_DIR`, `ZISK_GUEST_ELF`, `ZISKEMU`,
-   `CORPUS_OUT`, `CARGO_TARGET_DIR`, `EMU_JOBS`.
+   `CORPUS_OUT`, `CARGO_TARGET_DIR`, `EMU_JOBS`, `OK_MIN_PERCENT`.
 
 ## Running
 
@@ -71,8 +71,12 @@ tools/corpus-emu.sh istanbul/eip152_blake2 ...  # targeted families
 
 - Chunks are resumable: a chunk with an existing results file is skipped;
   delete `$CORPUS_OUT/chunks/<chunk>.tsv` to re-run it.
-- The run ends with a waiver reconciliation against `corpus-waivers.tsv`;
-  exit 0 means steady state reproduced.
+- The run ends with a waiver reconciliation against `corpus-waivers.tsv`
+  and an emulation-coverage check; exit 0 means steady state reproduced.
+- Coverage holds the OK share to `OK_MIN_PERCENT` (default 90). The waiver
+  reconciliation counts guest panics, so a run whose reader rejected every
+  case reports zero panics with every row waived — total failure that reads
+  as success. The floor is what makes such a run fail.
 - A quick post-bump sanity pass: run three or four small families
   (`istanbul/eip1344_chainid byzantium/eip196_ec_add_mul
   cancun/eip1153_tstore`) before committing to `--all`.

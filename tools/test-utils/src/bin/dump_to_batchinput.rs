@@ -257,10 +257,11 @@ struct RecordingDb {
     read_accounts: RefCell<BTreeSet<Address>>,
 }
 
-impl revm::DatabaseRef for RecordingDb {
-    type Error = RecErr;
-
-    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, RecErr> {
+impl RecordingDb {
+    /// Read an account's pre-state properties and record the two reads the
+    /// guest's `ProvenDB::basic_ref` authenticates: the account itself and its
+    /// account-properties flat key, whose proof carries the account's existence.
+    fn read_account_props(&self, address: Address) -> Result<Option<AccountProperties>, RecErr> {
         self.read_accounts.borrow_mut().insert(address);
         let fk = derive_account_properties_key(&address.into_array());
         self.read_slots.borrow_mut().insert(fk);
@@ -271,30 +272,42 @@ impl revm::DatabaseRef for RecordingDb {
                         "no preimage for account {address} props hash {hash}"
                     ))
                 })?;
-                let props = AccountProperties::decode(preimage)
-                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))?;
-                let code_hash = if props.observable_bytecode_hash.is_zero() {
-                    if props.nonce == 0 && props.balance == [0u8; 32] {
-                        B256::ZERO
-                    } else {
-                        KECCAK_EMPTY
-                    }
-                } else {
-                    props.observable_bytecode_hash
-                };
-                let code = self.code.get(&code_hash).map(|c| {
-                    revm::state::Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(c))
-                });
-                Ok(Some(revm::state::AccountInfo {
-                    nonce: props.nonce,
-                    balance: U256::from_be_bytes(props.balance),
-                    code_hash,
-                    code,
-                    account_id: None,
-                }))
+                AccountProperties::decode(preimage)
+                    .map(Some)
+                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))
             }
             _ => Ok(None),
         }
+    }
+}
+
+impl revm::DatabaseRef for RecordingDb {
+    type Error = RecErr;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, RecErr> {
+        let Some(props) = self.read_account_props(address)? else {
+            return Ok(None);
+        };
+        let code_hash = if props.observable_bytecode_hash.is_zero() {
+            if props.nonce == 0 && props.balance == [0u8; 32] {
+                B256::ZERO
+            } else {
+                KECCAK_EMPTY
+            }
+        } else {
+            props.observable_bytecode_hash
+        };
+        let code = self
+            .code
+            .get(&code_hash)
+            .map(|c| revm::state::Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(c)));
+        Ok(Some(revm::state::AccountInfo {
+            nonce: props.nonce,
+            balance: U256::from_be_bytes(props.balance),
+            code_hash,
+            code,
+            account_id: None,
+        }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<revm::state::Bytecode, RecErr> {
@@ -327,6 +340,58 @@ impl revm::DatabaseRef for RecordingDb {
     }
 }
 
+/// The EIP-2935 history contract and the size of its ring, as
+/// `executor::eip2935` states them.
+const HISTORY_STORAGE_ADDRESS: Address =
+    revm::primitives::address!("0000f90827f1c53a10cb7a02335b175320002935");
+const HISTORY_SERVE_WINDOW: u64 = 8191;
+
+/// Mirror of executor::eip2935::apply_pre_block_write for the tracking pass.
+///
+/// The step runs before the block's first transaction, so a run of the
+/// transactions alone observes neither of its two reads, and the witness comes
+/// out without the history contract's account-properties proof and without the
+/// ring slot's proof — both of which the guest requires. Performing the write
+/// here also puts its value in the overlay, so a transaction that reads the ring
+/// slot observes what the guest observes.
+fn tracking_pre_block_write(
+    block_number: u64,
+    cache_db: &mut revm::database::CacheDB<RecordingDb>,
+) {
+    use revm::DatabaseRef;
+
+    let props = cache_db
+        .db
+        .read_account_props(HISTORY_STORAGE_ADDRESS)
+        .expect("history contract pre-state");
+    // Native's gate is `is_contract()`: the account holds code and carries no
+    // EIP-7702 delegation.
+    let is_contract = props.is_some_and(|p| {
+        p.observable_bytecode_len > 0
+            && (p.versioning >> 56) as u8
+                != zksync_os_zisk_lib::account_props::DELEGATED_STATUS_BYTE
+    });
+    if !is_contract {
+        return;
+    }
+
+    let slot = U256::from((block_number - 1) % HISTORY_SERVE_WINDOW);
+    cache_db
+        .storage_ref(HISTORY_STORAGE_ADDRESS, slot)
+        .expect("history contract ring slot");
+    let parent_hash = cache_db
+        .db
+        .block_hash_ref(block_number - 1)
+        .expect("RecordingDb::block_hash_ref is infallible");
+    cache_db
+        .insert_account_storage(
+            HISTORY_STORAGE_ADDRESS,
+            slot,
+            U256::from_be_bytes(parent_hash.0),
+        )
+        .expect("history contract pre-state");
+}
+
 /// Mirror of executor::evm::run_evm_block for the tracking pass (records
 /// reads). Transactions are built by the guest's own
 /// `executor::tx::build_proven_tx`, so tracking and guest execution can
@@ -340,6 +405,10 @@ fn tracking_run(
 ) {
     use revm::ExecuteCommitEvm;
     use zksync_os_revm::{zk_context, ZkBuilder};
+
+    if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        tracking_pre_block_write(block.number, cache_db);
+    }
 
     let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
@@ -695,24 +764,8 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
              the panic point only (the guest is expected to panic there too)"
         );
     }
-    let mut read_slots = cache.db.read_slots.borrow().clone();
-    let mut read_accounts = cache.db.read_accounts.borrow().clone();
-    // The EIP-2935 pre-block step is outside the transaction loop, so the
-    // tracking run above never observes its two reads. An AtlasV4 witness must
-    // still carry both proofs, or the guest fails closed on them.
-    if ZkSpecId::AtlasV4.is_enabled_in(spec) {
-        const HISTORY_STORAGE_ADDRESS: &str = "0000f90827f1c53a10cb7a02335b175320002935";
-        const HISTORY_SERVE_WINDOW: u64 = 8191;
-        let history = haddr(HISTORY_STORAGE_ADDRESS);
-        read_accounts.insert(history);
-        let slot_index = (block_env.number - 1) % HISTORY_SERVE_WINDOW;
-        let mut slot = [0u8; 32];
-        slot[24..].copy_from_slice(&slot_index.to_be_bytes());
-        read_slots.insert(derive_flat_storage_key(
-            &history.into_array(),
-            &B256::from(slot),
-        ));
-    }
+    let read_slots = cache.db.read_slots.borrow().clone();
+    let read_accounts = cache.db.read_accounts.borrow().clone();
     println!(
         "tracking: {} slot reads, {} account reads, {} bytecodes",
         read_slots.len(),
@@ -1307,5 +1360,37 @@ mod tests {
         let (recovered, value) = proof.verify(&missing).expect("verify");
         assert_eq!(recovered, root);
         assert!(value.is_none());
+    }
+
+    /// Every AtlasV4 block authenticates the EIP-2935 history contract before
+    /// it runs a transaction, and it does so even where the contract holds no
+    /// code — the gate itself reads the account. The tracking pass must
+    /// therefore record the account and its account-properties key, which is
+    /// the key whose proof carries the account's existence, against a pre-state
+    /// that holds no history contract at all.
+    #[test]
+    fn tracking_records_the_eip2935_history_account_read() {
+        let rec = RecordingDb {
+            storage: HashMap::new(),
+            preimages: HashMap::new(),
+            code: HashMap::new(),
+            block_hashes: HashMap::new(),
+            read_slots: RefCell::new(BTreeSet::new()),
+            read_accounts: RefCell::new(BTreeSet::new()),
+        };
+        let mut cache = revm::database::CacheDB::new(rec);
+        tracking_pre_block_write(1, &mut cache);
+        assert!(cache
+            .db
+            .read_accounts
+            .borrow()
+            .contains(&HISTORY_STORAGE_ADDRESS));
+        assert!(cache
+            .db
+            .read_slots
+            .borrow()
+            .contains(&derive_account_properties_key(
+                &HISTORY_STORAGE_ADDRESS.into_array()
+            )));
     }
 }
