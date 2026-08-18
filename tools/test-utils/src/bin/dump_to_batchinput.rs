@@ -338,10 +338,9 @@ fn tracking_run(
     max_tx_gas_limit: u64,
 ) {
     use revm::ExecuteCommitEvm;
-    use zksync_os_revm::{DefaultZk, ZkBuilder, ZkContext};
+    use zksync_os_revm::{zk_context, ZkBuilder};
 
-    let mut evm = <ZkContext<_>>::default()
-        .with_db(cache_db)
+    let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = chain_id;
             cfg.spec = spec_id;
@@ -357,12 +356,12 @@ fn tracking_run(
         .build_zk();
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
-        evm.0.ctx.chain.set_tx_number(tx_idx as u16);
+        evm.0.ctx.journaled_state.set_tx_number(tx_idx as u16);
         let (tx, _tx_hash, _tx_type) =
             executor::tx::build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         match evm.transact_commit(tx) {
             Ok(_result) => {
-                let _ = evm.0.ctx.chain.take_logs();
+                let _ = evm.0.ctx.journaled_state.take_l2_to_l1_logs();
             }
             Err(e) => panic!("tracking tx {tx_idx} failed: {e:?}"),
         }
