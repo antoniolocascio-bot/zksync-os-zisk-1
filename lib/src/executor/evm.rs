@@ -35,7 +35,7 @@ pub(super) fn execute_block_proven(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut CacheDB<ProvenDB>,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) -> (BlockResult, BlockStateEffects) {
     let (tx_results, tx_hashes, computed_l2_to_l1_logs, state_effects) =
         run_evm_block(chain_id, spec_id, block, cache_db, max_tx_gas_limit);
@@ -123,7 +123,7 @@ fn run_evm_block<DB: DatabaseRef>(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut CacheDB<DB>,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) -> (Vec<TxOutput>, Vec<B256>, Vec<L2ToL1LogEntry>, BlockStateEffects)
 where
     DB::Error: core::fmt::Debug,

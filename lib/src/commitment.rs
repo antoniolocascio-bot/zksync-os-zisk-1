@@ -217,25 +217,30 @@ pub fn da_commitment_blobs(versioned_hashes: &[B256]) -> B256 {
     keccak256(&data)
 }
 
-/// Full batch public input hash, matching zksync-os v0.3.2
-/// `BatchPublicInput::hash` (basic_bootloader .../zk/post_tx_op/public_input.rs):
-/// Keccak256(state_before || state_after || batch_output_hash)
+/// Full batch public input hash, matching the native `BatchPublicInput::hash`
+/// (basic_bootloader .../zk/post_tx_op/public_input.rs) of the spec that
+/// executed the batch.
 ///
-/// The three-word form is the one L1 gates against: `Executor`'s
-/// `_getBatchProofPublicInputZKsyncOS` hashes the two state commitments and the
-/// batch commitment. A fourth `chain_config_hash` word belongs to the 0.4.0
-/// line, which this guest does not reach — it resolves AtlasV1 through AtlasV3
-/// alone. Committing that word here gives a public input the first prover never
-/// computes, so L1 cannot gate the two proof lanes against each other.
+/// - AtlasV1 through AtlasV3 (`chain_config_hash = None`): three words,
+///   `keccak256(state_before ‖ state_after ‖ batch_output_hash)`.
+/// - AtlasV4 (`chain_config_hash = Some(..)`): four words, with the chain-config
+///   commitment as the third.
+///
+/// The caller passes the option so the layout choice stays a single explicit
+/// decision at the spec gate.
 pub fn batch_public_input_hash(
     state_before: &B256,
     state_after: &B256,
+    chain_config_hash: Option<&B256>,
     batch_output_hash: &B256,
 ) -> B256 {
-    let mut data = [0u8; 96];
-    data[..32].copy_from_slice(state_before.as_slice());
-    data[32..64].copy_from_slice(state_after.as_slice());
-    data[64..96].copy_from_slice(batch_output_hash.as_slice());
+    let mut data = Vec::with_capacity(128);
+    data.extend_from_slice(state_before.as_slice());
+    data.extend_from_slice(state_after.as_slice());
+    if let Some(chain_config_hash) = chain_config_hash {
+        data.extend_from_slice(chain_config_hash.as_slice());
+    }
+    data.extend_from_slice(batch_output_hash.as_slice());
     keccak256(&data)
 }
 
@@ -258,7 +263,7 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(
-            batch_public_input_hash(&state_before, &state_after, &batch_output),
+            batch_public_input_hash(&state_before, &state_after, None, &batch_output),
             expected,
         );
     }
@@ -270,6 +275,43 @@ mod tests {
                 .parse()
                 .unwrap();
         assert_eq!(priority_ops_rolling_hash(&[]), expected);
+    }
+
+    /// The two public-input layouts are the plain concatenations native hashes,
+    /// and they differ. AtlasV1 through AtlasV3 hash three words; AtlasV4 adds
+    /// the chain-config commitment as the third of four.
+    #[test]
+    fn public_input_layouts_are_three_and_four_words() {
+        let state_before = B256::repeat_byte(0x11);
+        let state_after = B256::repeat_byte(0x22);
+        let chain_config = B256::repeat_byte(0x33);
+        let batch_output = B256::repeat_byte(0x44);
+
+        let mut three = Vec::new();
+        three.extend_from_slice(state_before.as_slice());
+        three.extend_from_slice(state_after.as_slice());
+        three.extend_from_slice(batch_output.as_slice());
+        assert_eq!(
+            batch_public_input_hash(&state_before, &state_after, None, &batch_output),
+            keccak256(&three),
+        );
+
+        let mut four = Vec::new();
+        four.extend_from_slice(state_before.as_slice());
+        four.extend_from_slice(state_after.as_slice());
+        four.extend_from_slice(chain_config.as_slice());
+        four.extend_from_slice(batch_output.as_slice());
+        assert_eq!(
+            batch_public_input_hash(
+                &state_before,
+                &state_after,
+                Some(&chain_config),
+                &batch_output,
+            ),
+            keccak256(&four),
+        );
+
+        assert_ne!(keccak256(&three), keccak256(&four));
     }
 
     #[test]

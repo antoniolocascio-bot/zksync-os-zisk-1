@@ -97,8 +97,11 @@ mod tests {
         data
     }
 
-    #[test]
-    fn test_proven_path_with_real_merkle_proofs() {
+    /// A one-block batch whose single L1 transaction is force-failed, so the
+    /// only merkle proof it needs is the sender's account-properties leaf. The
+    /// caller picks the spec and the protocol minor, which is what makes the
+    /// batch usable for the version-gated commitment layouts.
+    fn minimal_force_fail_batch(spec_id: u8, protocol_version_minor: u32) -> BatchInput {
         // Setup: a sender with 10 ETH, nonce 0
         let sender: Address = "0x1000000000000000000000000000000000000001"
             .parse()
@@ -151,11 +154,11 @@ mod tests {
         let l1_tx_hash = alloy_primitives::keccak256(&l1_abi);
 
         // Now build a BatchInput with this proof
-        let batch_input = BatchInput {
+        BatchInput {
             version: crate::types::BATCH_INPUT_VERSION,
             chain_id: 270,
-            spec_id: 1, // AtlasV2
-            protocol_version_minor: 30,
+            spec_id,
+            protocol_version_minor,
             batch_meta: BatchMeta {
                 tree_root_before: tree_root,
                 leaf_count_before: leaf_count,
@@ -207,7 +210,12 @@ mod tests {
                 expected_tree_root: B256::ZERO,
             }],
             bytecodes: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn test_proven_path_with_real_merkle_proofs() {
+        let batch_input = minimal_force_fail_batch(1, 30); // AtlasV2, protocol v30
 
         // Run the proven execution path
         let (output, commitment) = executor::execute_and_commit(&batch_input);
@@ -224,6 +232,54 @@ mod tests {
         // Commitment should be non-zero
         assert_ne!(commitment, B256::ZERO, "commitment should be non-zero");
         println!("BatchPublicInput commitment: {commitment}");
+    }
+
+    /// A batch on a spec before AtlasV4 commits the three-word public input
+    /// `keccak256(state_before ‖ state_after ‖ batch_output)`, which is what
+    /// released native computes on the v30 and v31 lines. A fourth word would
+    /// commit a value the first prover never produces, so L1 could not gate the
+    /// two lanes against each other.
+    #[test]
+    fn pre_atlas_v4_commits_the_three_word_public_input() {
+        // AtlasV1 and AtlasV2 (protocol v30) plus AtlasV3 (protocol v31).
+        let batches = [
+            minimal_force_fail_batch(0, 30),
+            minimal_force_fail_batch(1, 30),
+            honest_transfer_batch().0,
+        ];
+        for batch_input in batches {
+            let spec_id = batch_input.spec_id;
+            let (_output, commitment, state_before, state_after, batch_output) =
+                executor::execute_and_commit_debug(&batch_input);
+
+            assert_eq!(
+                commitment,
+                crate::commitment::batch_public_input_hash(
+                    &state_before,
+                    &state_after,
+                    None,
+                    &batch_output,
+                ),
+                "spec_id {spec_id} must commit three words",
+            );
+
+            // The AtlasV4 four-word form of the same batch is a different value,
+            // so the gate is doing work rather than agreeing by accident.
+            let chain_config_hash = crate::commitment::chain_config_hash(
+                batch_input.chain_id,
+                batch_input.batch_meta.fri_proof_verification_enabled,
+                batch_input.batch_meta.max_tx_gas_limit,
+            );
+            assert_ne!(
+                commitment,
+                crate::commitment::batch_public_input_hash(
+                    &state_before,
+                    &state_after,
+                    Some(&chain_config_hash),
+                    &batch_output,
+                ),
+            );
+        }
     }
 
     #[test]
