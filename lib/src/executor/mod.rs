@@ -4,6 +4,7 @@
 //! recovers the expected state root. Values come FROM the proofs, not from
 //! a separate data path.
 
+mod eip2935;
 mod evm;
 mod interop;
 mod proven_db;
