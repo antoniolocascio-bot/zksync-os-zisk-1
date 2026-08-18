@@ -565,4 +565,46 @@ mod tests {
         let input = l2_input(signed_l2_tx(2_000_000));
         build_proven_tx(&input, 1_000_000, None);
     }
+
+    /// The type byte this builder reports enters every AtlasV4 receipt leaf, so
+    /// it must equal native's own class byte. The L2 path takes it from the
+    /// envelope, whose discriminants are the EIP type numbers; the L1 and
+    /// upgrade paths take it from the hash-authenticated ABI encoding; the
+    /// system path is the protocol constant.
+    #[test]
+    fn transaction_type_bytes_match_the_native_classes() {
+        use alloy_consensus::TxType;
+
+        assert_eq!(TxType::Legacy as u8, 0);
+        assert_eq!(TxType::Eip2930 as u8, 1);
+        assert_eq!(TxType::Eip1559 as u8, 2);
+        assert_eq!(TxType::Eip4844 as u8, 3);
+        assert_eq!(TxType::Eip7702 as u8, 4);
+        assert_eq!(SYSTEM_TX_TYPE, 0x7d);
+
+        // The plumbing: a legacy envelope reports 0.
+        let (_tx, _hash, tx_type) = build_proven_tx(&l2_input(signed_l2_tx(21_000)), u64::MAX, None);
+        assert_eq!(tx_type, 0);
+
+        // The L1 and upgrade paths report the ABI's `txType` word verbatim.
+        for claimed in [0x7fu8, 0x7e] {
+            let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+            abi[31] = 0x20; // outer offset
+            abi[32 + 31] = claimed; // txType
+            let dyn_base = 19u32 * 32;
+            for j in 0..5u32 {
+                let off = 32 + (14 + j as usize) * 32;
+                abi[off + 28..off + 32].copy_from_slice(&(dyn_base + j * 32).to_be_bytes());
+            }
+            let tx_hash = crate::hash::keccak256(&abi);
+            let input = TxInput {
+                chain_id: Some(1),
+                gas_used_override: None,
+                force_fail: false,
+                auth: TxAuth::L1 { tx_hash, abi_encoded: abi },
+            };
+            let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, None);
+            assert_eq!(tx_type, claimed);
+        }
+    }
 }

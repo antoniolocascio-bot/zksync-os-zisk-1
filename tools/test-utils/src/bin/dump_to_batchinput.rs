@@ -169,6 +169,7 @@ fn zk_spec(spec_id: u8) -> ZkSpecId {
         0 => ZkSpecId::AtlasV1,
         1 => ZkSpecId::AtlasV2,
         2 => ZkSpecId::AtlasV3,
+        3 => ZkSpecId::AtlasV4,
         x => panic!("unknown spec_id {x}"),
     }
 }
@@ -335,7 +336,7 @@ fn tracking_run(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut revm::database::CacheDB<RecordingDb>,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) {
     use revm::ExecuteCommitEvm;
     use zksync_os_revm::{zk_context, ZkBuilder};
@@ -681,7 +682,10 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
     };
     let mut cache = revm::database::CacheDB::new(rec);
     // Resolve the per-tx gas cap the same way `build_batch_input` does below.
-    let max_tx_gas_limit = resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit);
+    // Only a spec that applies EIP-7825 passes it to the transaction builder.
+    let max_tx_gas_limit = ZkSpecId::AtlasV4
+        .is_enabled_in(spec)
+        .then(|| resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit));
     let tracked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tracking_run(d.chain_id, spec, &block_env, &mut cache, max_tx_gas_limit);
     }));
@@ -691,8 +695,24 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
              the panic point only (the guest is expected to panic there too)"
         );
     }
-    let read_slots = cache.db.read_slots.borrow().clone();
-    let read_accounts = cache.db.read_accounts.borrow().clone();
+    let mut read_slots = cache.db.read_slots.borrow().clone();
+    let mut read_accounts = cache.db.read_accounts.borrow().clone();
+    // The EIP-2935 pre-block step is outside the transaction loop, so the
+    // tracking run above never observes its two reads. An AtlasV4 witness must
+    // still carry both proofs, or the guest fails closed on them.
+    if ZkSpecId::AtlasV4.is_enabled_in(spec) {
+        const HISTORY_STORAGE_ADDRESS: &str = "0000f90827f1c53a10cb7a02335b175320002935";
+        const HISTORY_SERVE_WINDOW: u64 = 8191;
+        let history = haddr(HISTORY_STORAGE_ADDRESS);
+        read_accounts.insert(history);
+        let slot_index = (block_env.number - 1) % HISTORY_SERVE_WINDOW;
+        let mut slot = [0u8; 32];
+        slot[24..].copy_from_slice(&slot_index.to_be_bytes());
+        read_slots.insert(derive_flat_storage_key(
+            &history.into_array(),
+            &B256::from(slot),
+        ));
+    }
     println!(
         "tracking: {} slot reads, {} account reads, {} bytecodes",
         read_slots.len(),
@@ -1166,7 +1186,7 @@ mod tests {
         let l2_logs_root =
             commitment::keccak_two(&commitment::l2_to_l1_logs_root(&[]), &B256::ZERO);
         let bo = commitment::batch_output_hash_native(
-            true, // v31 layout
+            commitment::BatchOutputLayout::V31,
             37,
             42,
             42,
@@ -1185,7 +1205,9 @@ mod tests {
             0,
         );
         let ccfg = commitment::chain_config_hash(37, false, 1 << 24);
-        let pi = commitment::batch_public_input_hash(&sb, &sa, &ccfg, &bo);
+        // A v31 batch commits the three-word public input: released native on
+        // that line carries no chain-config word.
+        let pi = commitment::batch_public_input_hash(&sb, &sa, None, &bo);
 
         let zero = "00".repeat(32);
         let guards = format!(
