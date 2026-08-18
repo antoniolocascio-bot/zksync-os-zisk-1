@@ -7,7 +7,7 @@ tree root, state commitments, per-account after-images), and executes each
 case in `ziskemu` with the pinned guest ELF.
 
 **Steady state** (established 2026-08-07 against the 0.3.0/v31 line,
-guest ELF `81c0a04e…`):
+guest ELF `0222b690…`):
 10,362 cases → 10,336 OK, 0 panics, 26 waived (`corpus-waivers.tsv`).
 `corpus-emu.sh` exits 0 exactly when a run reproduces this: only documented
 waivers remain. Any other outcome is a regression or a new finding. The count
