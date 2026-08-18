@@ -24,7 +24,7 @@ use super::tx::build_proven_tx;
 const BLOB_TX_TYPE: u8 = 3;
 
 /// What one block's execution produced.
-pub(super) struct BlockExecution {
+struct BlockExecution {
     tx_results: Vec<TxOutput>,
     /// Transaction hashes in execution order: the transaction-tree leaves, and
     /// the terms of the rolling hash on a spec that uses one.
@@ -197,6 +197,16 @@ where
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = chain_id;
             cfg.spec = spec_id;
+            // Native applies the EIP-7825 per-transaction gas cap in the L2
+            // validation path alone, and its value is
+            // `min(block_gas_limit, chain_config.max_tx_gas_limit)`, which a
+            // chain admin may raise above Ethereum's 2^24. L1, upgrade and
+            // system transactions take paths that apply no cap at all. REVM's
+            // Osaka default would instead cap every transaction at 2^24, which
+            // rejects an upgrade transaction native accepts and rejects an L2
+            // transaction on a chain that raised its configured cap.
+            // `build_proven_tx` applies native's rule.
+            cfg.tx_gas_limit_cap = Some(u64::MAX);
         })
         .modify_block_chained(|blk| {
             blk.number = U256::from(block.number);
@@ -209,12 +219,14 @@ where
         .build_zk();
 
     // AtlasV4 is the first spec whose block header carries a receipts root, so
-    // it is the only one that builds receipt leaves.
-    let commits_receipts = ZkSpecId::AtlasV4.is_enabled_in(spec_id);
+    // it is the only one that builds receipt leaves. It is also the first spec
+    // this guest supports whose EVM version admits blob transactions, which
+    // native rejects.
+    let is_atlas_v4 = ZkSpecId::AtlasV4.is_enabled_in(spec_id);
     let mut tx_results = Vec::with_capacity(block.transactions.len());
     let mut tx_hashes = Vec::with_capacity(block.transactions.len());
     let mut receipt_leaves =
-        Vec::with_capacity(if commits_receipts { block.transactions.len() } else { 0 });
+        Vec::with_capacity(if is_atlas_v4 { block.transactions.len() } else { 0 });
     // The block's running gas total. Each receipt leaf commits the value the
     // block reaches with its own transaction included.
     let mut cumulative_gas_used: u64 = 0;
@@ -235,7 +247,7 @@ where
 
         let (tx, tx_hash, tx_type) = build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         assert!(
-            !commits_receipts || tx_type != BLOB_TX_TYPE,
+            !is_atlas_v4 || tx_type != BLOB_TX_TYPE,
             "blob transactions are not enabled at AtlasV4: native's transaction \
              dispatch rejects the type-{BLOB_TX_TYPE} encoding",
         );
@@ -293,7 +305,7 @@ where
                     });
                 }
                 cumulative_gas_used += result.tx_gas_used();
-                if commits_receipts {
+                if is_atlas_v4 {
                     receipt_leaves.push(block_roots::receipt_leaf(
                         tx_type,
                         result.is_success(),

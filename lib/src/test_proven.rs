@@ -3454,13 +3454,24 @@ mod tests {
     /// in the pre-state, and the `tree_update` follows: only the `Contract` case
     /// adds the ring-slot leaf.
     fn atlas_v4_transfer_batch(history: History) -> BatchInput {
+        atlas_v4_transfer_batch_with_limits(history, 1_000_000, 100_000, 1 << 24)
+    }
+
+    /// `atlas_v4_transfer_batch` with the three gas bounds spelled out: the
+    /// block gas limit, the transaction's own gas limit, and the chain-config
+    /// EIP-7825 cap.
+    fn atlas_v4_transfer_batch_with_limits(
+        history: History,
+        block_gas_limit: u64,
+        tx_gas_limit: u64,
+        max_tx_gas_limit: u64,
+    ) -> BatchInput {
         use blake2::{Blake2s256, Digest};
 
         const GAS_PRICE: u64 = 10;
         const GAS_USED: u64 = 21_000;
         const BLOCK_NUMBER: u64 = 6;
         const TIMESTAMP: u64 = 1_700_000_000;
-        const BLOCK_GAS_LIMIT: u64 = 1_000_000;
         const BASE_FEE: u64 = 7;
         const HISTORY_SERVE_WINDOW: u64 = 8191;
 
@@ -3470,8 +3481,8 @@ mod tests {
         let coinbase_balance_before = U256::from(5u64);
         let fee = U256::from(GAS_USED) * U256::from(GAS_PRICE as u128);
 
-        let (sender, _) = sign_legacy([0x42u8; 32], 0, Address::ZERO, vec![], 100_000);
-        let (_, signed_bytes) = sign_legacy([0x42u8; 32], 0, sender, vec![], 100_000);
+        let (sender, _) = sign_legacy([0x42u8; 32], 0, Address::ZERO, vec![], tx_gas_limit);
+        let (_, signed_bytes) = sign_legacy([0x42u8; 32], 0, sender, vec![], tx_gas_limit);
         let coinbase: Address =
             "0x00000000000000000000000000000000c01badde".parse().unwrap();
 
@@ -3606,7 +3617,7 @@ mod tests {
             &crate::block_roots::block_tx_tree_root(&[tx_hash]),
             &crate::block_roots::block_tx_tree_root(&[receipt]),
             BLOCK_NUMBER,
-            BLOCK_GAS_LIMIT,
+            block_gas_limit,
             GAS_USED,
             TIMESTAMP,
             &B256::from([1u8; 32]),
@@ -3637,14 +3648,14 @@ mod tests {
                     (coinbase, coinbase_after),
                 ],
                 fri_proof_verification_enabled: false,
-                max_tx_gas_limit: 1 << 24,
+                max_tx_gas_limit,
                 interop_proofs,
             },
             blocks: vec![BlockInput {
                 number: BLOCK_NUMBER,
                 timestamp: TIMESTAMP,
                 base_fee: BASE_FEE,
-                gas_limit: BLOCK_GAS_LIMIT,
+                gas_limit: block_gas_limit,
                 coinbase,
                 prev_randao: B256::from([1u8; 32]),
                 block_header_hash,
@@ -3795,6 +3806,27 @@ mod tests {
         let mut batch = atlas_v4_transfer_batch(History::Contract);
         batch.blocks[0].block_header_hash = B256::ZERO;
         executor::execute_and_commit(&batch);
+    }
+
+    /// A chain may raise its EIP-7825 per-transaction cap above Ethereum's
+    /// 2^24, and native then accepts a transaction above that value. REVM's
+    /// Osaka default caps every transaction at 2^24, so the executor must
+    /// override it and leave native's rule to the transaction builder.
+    #[test]
+    fn atlas_v4_accepts_a_transaction_above_the_ethereum_gas_cap() {
+        const OVER_ETHEREUM_CAP: u64 = (1 << 24) + 1;
+        let batch = atlas_v4_transfer_batch_with_limits(
+            History::Contract,
+            1 << 25,
+            OVER_ETHEREUM_CAP,
+            1 << 25,
+        );
+        let (output, commitment) = executor::execute_and_commit(&batch);
+        assert_ne!(commitment, B256::ZERO);
+        assert!(
+            output.block_results[0].tx_results[0].success,
+            "native accepts this transaction, so the guest must execute it"
+        );
     }
 
     /// Native's transaction dispatch compiles no type-3 arm in any shipped
