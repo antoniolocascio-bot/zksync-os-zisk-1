@@ -128,11 +128,18 @@ fn run_execution_and_commit(
     // the execution journal as well: it decides which code encoding native
     // wrote for an account that ends the batch holding no code.
     let mut deployed_accounts: HashSet<revm::primitives::Address> = HashSet::new();
+    // EIP-7825 caps a transaction's own gas limit from AtlasV4 on. AtlasV1
+    // through AtlasV3 bound an L2 transaction by the block gas limit alone, so
+    // the chain-config cap stays off for them: an in-guest rejection that
+    // native does not perform makes a legitimate batch unprovable.
+    let max_tx_gas_limit = ZkSpecId::AtlasV4
+        .is_enabled_in(spec_id)
+        .then_some(meta.max_tx_gas_limit);
     for block in &input.blocks {
         verify_intra_batch_hashes(block, &computed_block_hashes);
 
         let (result, state_effects) = evm::execute_block_proven(
-            input.chain_id, spec_id, block, &mut cache_db, meta.max_tx_gas_limit,
+            input.chain_id, spec_id, block, &mut cache_db, max_tx_gas_limit,
         );
         // Feed the block's own computed header hash back into the BLOCKHASH map
         // so a later block's BLOCKHASH read resolves to this authenticated value.
@@ -322,16 +329,22 @@ fn run_execution_and_commit(
         derived_sl_chain_id,
     );
 
-    // Top-level PI commits to the chain config (draft-0.4.0 `BatchPublicInput::hash`).
-    let chain_config_hash = commitment::chain_config_hash(
-        input.chain_id,
-        meta.fri_proof_verification_enabled,
-        meta.max_tx_gas_limit,
-    );
+    // The top-level public input commits the chain config from AtlasV4 on
+    // (`BatchPublicInput::hash`). AtlasV1 through AtlasV3 hash three words:
+    // native on those lines carries no `chain_config_hash` field, so a fourth
+    // word would commit a value the first prover never computes, and L1 could
+    // not gate the two lanes against each other.
+    let chain_config_hash = ZkSpecId::AtlasV4.is_enabled_in(spec_id).then(|| {
+        commitment::chain_config_hash(
+            input.chain_id,
+            meta.fri_proof_verification_enabled,
+            meta.max_tx_gas_limit,
+        )
+    });
     let commitment = commitment::batch_public_input_hash(
         &state_before,
         &state_after,
-        &chain_config_hash,
+        chain_config_hash.as_ref(),
         &batch_hash,
     );
     (output, commitment, state_before, state_after, batch_hash)
