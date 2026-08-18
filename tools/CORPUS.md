@@ -6,15 +6,13 @@ the ZiSK/REVM guest against native ground truth on six axes (header hash,
 tree root, state commitments, per-account after-images), and executes each
 case in `ziskemu` with the pinned guest ELF.
 
-**Steady state** (established 2026-07-12 against the 0.3.0/v31 line,
-guest ELF `7cb3289f…`):
-10,369 cases → 10,336 OK, 0 panics, 26 waived (`corpus-waivers.tsv`).
+**Steady state** (established 2026-08-07 against the 0.3.0/v31 line,
+guest ELF `81c0a04e…`):
+10,362 cases → 10,336 OK, 0 panics, 26 waived (`corpus-waivers.tsv`).
 `corpus-emu.sh` exits 0 exactly when a run reproduces this: only documented
-waivers remain. Any other outcome is a regression or a new finding.
-
-That baseline predates the current ELF pin in `guest/GUEST_ELF_SHA256`. Run
-the suite again against the current ELF to re-establish steady state (see
-**When to re-run** below).
+waivers remain. Any other outcome is a regression or a new finding. The count
+spans 35 of the 36 chunks; `static_state_tests` needs a run of its own (see
+**Known sharp edges**).
 
 ## Architecture
 
@@ -122,6 +120,10 @@ emulation status, detail.
 
 ## Known sharp edges
 
+- `static_state_tests` holds 36,930 dumped cases, 3.5 times the rest of the
+  corpus, and its evm_tester log grows to about 118 GB and fills the volume.
+  Give that chunk its own run, discard the tester log, and budget about
+  twelve hours of emulation.
 - The corpus native build must use the `evm_tester_prod` feature set
   (production fee/precompile semantics). The stock `evm_tester` features
   emulate Ethereum semantics (base-fee burn, mocked precompiles) and make
@@ -129,6 +131,12 @@ emulation status, detail.
 - The runner force-enables all evm_tester index entries (worktree-local
   sed); fixture verdict FAILs under production semantics are expected and
   irrelevant — only executed blocks and their dumps matter.
+- v0.3.0-line bundles report `chain_config_max_tx_gas_limit: 0` (that forward
+  path has no ChainConfig). The reader substitutes a non-binding cap, so the
+  guest's `min(block_gas_limit, max_tx_gas_limit)` bound reduces to the block
+  gas limit — the bound native applies as well. A smaller substitute would
+  reject transactions native executed, which the fixtures do send: EEST blocks
+  routinely carry a 120,000,000 gas limit.
 - Bundles are self-contained per block, including mid-chain fields
   (`block_number_before`, `last_block_timestamp_before`,
   `block_hash_ring_head` — the last is essential at block ≥ 257, the ring

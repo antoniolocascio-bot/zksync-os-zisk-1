@@ -13,8 +13,8 @@
 //!   cargo run --bin dump_to_batchinput -- <dump.json> <out_dir> [--no-validate]
 //!
 //! Outputs:
-//!   <out_dir>/batch_input.bin — bincode 1.x fixint `BatchInput` (server format)
-//!   <out_dir>/input.bin       — ziskemu framing: [len u64 LE][bincode][zero pad to 8]
+//!   <out_dir>/batch_input.bin — `BatchInput` in the `lib::wire` encoding
+//!   <out_dir>/input.bin       — ziskemu framing: [len u64 LE][wire bytes][zero pad to 8]
 //!
 //! `--no-validate` skips the native-reference comparison — for corpus entries
 //! where the guest is expected to panic (the artifacts are always written).
@@ -34,6 +34,7 @@ use zksync_os_zisk_lib::merkle::{
     WriteOp, TREE_DEPTH,
 };
 use zksync_os_zisk_lib::types::*;
+use zksync_os_zisk_lib::wire;
 
 // ---------------------------------------------------------------------------
 // Bundle schema (all 32-byte values lowercase hex without 0x)
@@ -111,7 +112,10 @@ struct DDump {
     native_batch_public_input: String,
     #[serde(default)]
     chain_config_fri: bool,
-    #[serde(default = "dflt_max_tx_gas_limit")]
+    /// 0 when the bundle carries no chain config. `resolve_max_tx_gas_limit`
+    /// substitutes the witness value; the native-reference comparison uses
+    /// this field verbatim.
+    #[serde(default)]
     chain_config_max_tx_gas_limit: u64,
     /// Pre-block chain position (hook commit a37838a8): both feed the
     /// pre-block ChainStateCommitment. Old bundles (chain-start blocks)
@@ -131,8 +135,23 @@ struct DDump {
     block_hash_ring_head: String,
 }
 
-fn dflt_max_tx_gas_limit() -> u64 {
-    1 << 24
+/// Per-tx gas cap for the witness when the bundle carries no chain config.
+///
+/// The guest bounds every L2 transaction by `min(block_gas_limit,
+/// max_tx_gas_limit)`. Any substitute below the block gas limit would reject
+/// transactions the native rig executed, so the substitute must be
+/// non-binding: the bound then reduces to the block gas limit, which native
+/// enforces too.
+const UNCONFIGURED_MAX_TX_GAS_LIMIT: u64 = u64::MAX;
+
+/// Resolve the per-tx gas cap the witness commits to. A v0.3.0-line bundle
+/// reports 0 (that forward path has no ChainConfig).
+fn resolve_max_tx_gas_limit(bundle_value: u64) -> u64 {
+    if bundle_value == 0 {
+        UNCONFIGURED_MAX_TX_GAS_LIMIT
+    } else {
+        bundle_value
+    }
 }
 
 fn hbytes(s: &str) -> Vec<u8> {
@@ -662,14 +681,8 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
         read_accounts: RefCell::new(BTreeSet::new()),
     };
     let mut cache = revm::database::CacheDB::new(rec);
-    // Resolve the per-tx gas cap the same way `build_batch_input` does below:
-    // v0.3.0-line bundles carry 0 (no ChainConfig), which would reject every
-    // tx, so fall back to the v31 default.
-    let max_tx_gas_limit = if d.chain_config_max_tx_gas_limit == 0 {
-        1 << 24
-    } else {
-        d.chain_config_max_tx_gas_limit
-    };
+    // Resolve the per-tx gas cap the same way `build_batch_input` does below.
+    let max_tx_gas_limit = resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit);
     let tracked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tracking_run(d.chain_id, spec, &block_env, &mut cache, max_tx_gas_limit);
     }));
@@ -863,13 +876,7 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
         tree_update: Some(tree_update),
         account_preimages_after,
         fri_proof_verification_enabled: d.chain_config_fri,
-        // v0.3.0-line bundles carry 0 here (no ChainConfig in that forward
-        // path); 0 would reject every tx, so fall back to the v31 default.
-        max_tx_gas_limit: if d.chain_config_max_tx_gas_limit == 0 {
-            1 << 24
-        } else {
-            d.chain_config_max_tx_gas_limit
-        },
+        max_tx_gas_limit: resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit),
         interop_proofs,
     };
 
@@ -970,10 +977,10 @@ fn validate(d: &DDump, bi: &BatchInput) -> bool {
     ok
 }
 
-fn frame_for_zisk(bincode_bytes: &[u8]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(8 + bincode_bytes.len() + 8);
-    framed.extend_from_slice(&(bincode_bytes.len() as u64).to_le_bytes());
-    framed.extend_from_slice(bincode_bytes);
+fn frame_for_zisk(wire_bytes: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(8 + wire_bytes.len() + 8);
+    framed.extend_from_slice(&(wire_bytes.len() as u64).to_le_bytes());
+    framed.extend_from_slice(wire_bytes);
     let pad = (8 - (framed.len() % 8)) % 8;
     framed.extend(std::iter::repeat_n(0u8, pad));
     framed
@@ -1014,7 +1021,7 @@ fn main() {
 
     let out = Path::new(&out_dir);
     std::fs::create_dir_all(out).expect("create out_dir");
-    let data = bincode::serialize(&bi).expect("bincode serialize");
+    let data = wire::encode(&bi).expect("wire encode");
     let bin_path = out.join("batch_input.bin");
     std::fs::write(&bin_path, &data).expect("write batch_input.bin");
     let framed = frame_for_zisk(&data);
@@ -1094,9 +1101,15 @@ mod tests {
         assert_eq!(d.txs.len(), 1);
         assert_eq!(d.txs[0].gas_used, 21000);
         assert_eq!(hbytes(&d.txs[0].signed), vec![0x02, 0xf8, 0x70]);
-        // Chain-config fields default when absent from the bundle.
+        // Chain-config fields default when absent from the bundle. A zero cap
+        // means "no chain config"; `resolve_max_tx_gas_limit` maps it to the
+        // non-binding witness value.
         assert!(!d.chain_config_fri);
-        assert_eq!(d.chain_config_max_tx_gas_limit, 1 << 24);
+        assert_eq!(d.chain_config_max_tx_gas_limit, 0);
+        assert_eq!(
+            resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit),
+            UNCONFIGURED_MAX_TX_GAS_LIMIT
+        );
         assert_eq!(d.previous_block_hashes.len(), 2);
         // Mid-chain position fields default for chain-start bundles.
         assert!(d.block_number_before.is_none());
@@ -1194,6 +1207,7 @@ mod tests {
               "tree_root_after": "{r}", "leaf_count_after": 2,
               "pre": {state}, "post": {state},
               "txs": [], "pubdata": "",
+              "chain_config_max_tx_gas_limit": 16777216,
               "block_header_hash": "{hh}",
               "block_hashes_blake_before": "{bhb}",
               "previous_block_hashes": [],

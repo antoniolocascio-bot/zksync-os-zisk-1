@@ -3,6 +3,8 @@
 //! Runs a block's transactions through REVM, collects results and L2→L1 logs,
 //! and verifies the computed block header hash.
 
+use std::collections::HashSet;
+
 use revm::database::CacheDB;
 use revm::primitives::{B256, U256};
 use revm::{DatabaseRef, ExecuteCommitEvm, ExecuteEvm};
@@ -14,6 +16,18 @@ use crate::types::*;
 use super::proven_db::ProvenDB;
 use super::tx::build_proven_tx;
 
+/// The state effects of one block that batch-level write-map verification needs.
+pub(super) struct BlockStateEffects {
+    /// Net per-slot storage changes: (address, slot) → the last value written.
+    pub(super) storage_writes: Vec<((Address, U256), U256)>,
+    /// Accounts that destruction removed from the state.
+    pub(super) destroyed_accounts: HashSet<Address>,
+    /// Accounts a deployment completed at. Native runs `deploy_code` for every
+    /// completed deployment, so these accounts carry the deployed code
+    /// encoding even when the deployed runtime code is empty.
+    pub(super) deployed_accounts: HashSet<Address>,
+}
+
 /// Execute a single block using the shared batch-level CacheDB.
 /// Writes from this block remain in the CacheDB for subsequent blocks.
 pub(super) fn execute_block_proven(
@@ -22,8 +36,8 @@ pub(super) fn execute_block_proven(
     block: &BlockInput,
     cache_db: &mut CacheDB<ProvenDB>,
     max_tx_gas_limit: u64,
-) -> (BlockResult, Vec<((Address, U256), U256)>) {
-    let (tx_results, tx_hashes, computed_l2_to_l1_logs, net_storage_changes) =
+) -> (BlockResult, BlockStateEffects) {
+    let (tx_results, tx_hashes, computed_l2_to_l1_logs, state_effects) =
         run_evm_block(chain_id, spec_id, block, cache_db, max_tx_gas_limit);
 
     let total_gas_used: u64 = tx_results.iter().map(|t| t.gas_used).sum();
@@ -98,7 +112,7 @@ pub(super) fn execute_block_proven(
             tx_results,
             l2_to_l1_logs: computed_l2_to_l1_logs,
         },
-        net_storage_changes,
+        state_effects,
     )
 }
 
@@ -110,12 +124,7 @@ fn run_evm_block<DB: DatabaseRef>(
     block: &BlockInput,
     cache_db: &mut CacheDB<DB>,
     max_tx_gas_limit: u64,
-) -> (
-    Vec<TxOutput>,
-    Vec<B256>,
-    Vec<L2ToL1LogEntry>,
-    Vec<((Address, U256), U256)>,
-)
+) -> (Vec<TxOutput>, Vec<B256>, Vec<L2ToL1LogEntry>, BlockStateEffects)
 where
     DB::Error: core::fmt::Debug,
 {
@@ -146,6 +155,8 @@ where
     // per-block diff (and therefore in the batch tree update).
     let mut slot_writes: std::collections::HashMap<(Address, U256), (U256, U256)> =
         std::collections::HashMap::new();
+    let mut destroyed_accounts: HashSet<Address> = HashSet::new();
+    let mut deployed_accounts: HashSet<Address> = HashSet::new();
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
         evm.0.ctx.chain.set_tx_number(tx_idx as u16);
@@ -165,7 +176,23 @@ where
                     // writes: a pre-existing account's SELFDESTRUCT is a
                     // balance transfer that never sets the flag.
                     if account.is_selfdestructed() {
+                        // `CacheDB::commit` clears the cache entry of a TOUCHED
+                        // selfdestructed account, leaving it indistinguishable
+                        // from a read of an absent account. Record the same set
+                        // commit acts on, so post-execution verification can
+                        // tell a destroyed account from an untouched one.
+                        if account.is_touched() {
+                            destroyed_accounts.insert(*addr);
+                        }
                         continue;
+                    }
+                    // A create frame that committed at this address. revm sets
+                    // the flag before the init code runs and clears it again on
+                    // revert, so it marks exactly the deployments that
+                    // completed — including one whose runtime code is empty,
+                    // which native still materializes as deployed.
+                    if account.is_created() {
+                        deployed_accounts.insert(*addr);
                     }
                     for (slot, s) in &account.storage {
                         if s.is_changed() {
@@ -198,11 +225,16 @@ where
         }
     }
 
-    let net_changes = slot_writes
+    let storage_writes = slot_writes
         .into_iter()
         .filter(|(_, (first, last))| first != last)
         .map(|(key, (_, last))| (key, last))
         .collect();
 
-    (tx_results, tx_hashes, l2_to_l1_logs, net_changes)
+    (
+        tx_results,
+        tx_hashes,
+        l2_to_l1_logs,
+        BlockStateEffects { storage_writes, destroyed_accounts, deployed_accounts },
+    )
 }
