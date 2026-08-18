@@ -9,7 +9,7 @@ use revm::database::CacheDB;
 use revm::primitives::{B256, U256};
 use revm::{DatabaseRef, ExecuteCommitEvm, ExecuteEvm};
 use revm::primitives::Address;
-use zksync_os_revm::{DefaultZk, ZkBuilder, ZkContext, ZkSpecId};
+use zksync_os_revm::{zk_context, ZkBuilder, ZkSpecId};
 
 use crate::block_header;
 use crate::types::*;
@@ -128,8 +128,7 @@ fn run_evm_block<DB: DatabaseRef>(
 where
     DB::Error: core::fmt::Debug,
 {
-    let mut evm = <ZkContext<_>>::default()
-        .with_db(cache_db)
+    let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = chain_id;
             cfg.spec = spec_id;
@@ -159,7 +158,7 @@ where
     let mut deployed_accounts: HashSet<Address> = HashSet::new();
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
-        evm.0.ctx.chain.set_tx_number(tx_idx as u16);
+        evm.0.ctx.journaled_state.set_tx_number(tx_idx as u16);
 
         let (tx, tx_hash, _tx_type) = build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         tx_hashes.push(tx_hash);
@@ -205,7 +204,7 @@ where
                 }
                 let result = result_and_state.result.clone();
                 evm.commit(result_and_state.state);
-                for log in evm.0.ctx.chain.take_logs() {
+                for log in evm.0.ctx.journaled_state.take_l2_to_l1_logs() {
                     l2_to_l1_logs.push(L2ToL1LogEntry {
                         l2_shard_id: log.l2_shard_id,
                         is_service: log.is_service,
