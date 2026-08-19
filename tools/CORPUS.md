@@ -49,6 +49,10 @@ generation contains pathological long-running cases. The target-emulation lane
 also stays separate: native replay cannot test the ZiSK entrypoint, fcall ABI,
 target memory behavior, or target crypto hooks.
 
+The AtlasV4/0.4.0 line has its own steady state to establish. Its runs take
+guest ELF `c2c4ed5b…`, which wires the EIP-152, EIP-4844 point-evaluation
+and EIP-2537 precompiles that AtlasV4 activates.
+
 ## Architecture
 
 ```
@@ -165,8 +169,7 @@ emulation status, detail.
 - At the AtlasV4/0.5.0 guest bump: re-establish steady state against the
   0.5.0 line — its semantics drift from v31 (blake2s-merkle header
   tx/receipt roots, Pectra fee/precompile semantics), so expect a fresh
-  divergence-triage round and re-visit the blake2f/KZG/bls stub coverage
-  question.
+  divergence-triage round.
 
 ## Known sharp edges
 
