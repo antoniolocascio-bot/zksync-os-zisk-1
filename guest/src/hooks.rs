@@ -44,6 +44,7 @@ const BN254_FP_BE: [u8; 32] = [
 /// BLS12-381 base-field modulus p, big-endian:
 /// 4002409555221667393417789825735904156556882819939007885332058136124031650490
 /// 837864442687629129015664037894272559787.
+#[cfg(test)]
 const BLS12_381_FP_BE: [u8; 48] = [
     0x1a, 0x01, 0x11, 0xea, 0x39, 0x7f, 0xe6, 0x9a, 0x4b, 0x1b, 0xa7, 0xb6, 0x43, 0x4b, 0xac, 0xd7,
     0x64, 0x77, 0x4b, 0x84, 0xf3, 0x85, 0x12, 0xbf, 0x67, 0x30, 0xd2, 0xa0, 0xf6, 0xb0, 0xf6, 0x24,
@@ -253,6 +254,20 @@ pub fn bls12_381_g1_add(a: &[u8; 96], b: &[u8; 96], out: &mut [u8; 96]) -> u8 {
 /// EIP-2537 BLS12-381 G1 multi-scalar multiplication (precompile 0x0c).
 ///
 /// `pairs` is `n` × 128 bytes (96-byte point ‖ 32-byte scalar).
+///
+/// EXCEPTION — a call that holds a pair whose point is not the identity and
+/// whose scalar reduces to zero mod the subgroup order r: zisklib's
+/// `msm_complete_bls12_381` drops such a pair BEFORE it validates the point,
+/// while the reference validates every point and drops the zero-scalar pairs
+/// only after that. An invalid point next to such a scalar therefore halts
+/// the reference where zisklib alone returns a value. Route that call to
+/// REVM's software reference (`DefaultCrypto`), bit-identical to the native
+/// side of the equivalence check by construction; every other call keeps the
+/// accelerated path, and a zero-mod-r scalar contributes nothing, so real
+/// traffic rarely carries one. The route links REVM's arkworks BLS12-381
+/// backend, which costs about 160 KiB of guest ROM and no cycles outside the
+/// corner case. Drop this branch when upstream validates the point before it
+/// drops the pair (see the tripwire test below).
 pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(128));
     let mut points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 128);
@@ -264,8 +279,12 @@ pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
         scalars.push(zisklib::scalar_bytes_be_to_u64_le_bls12_381(scalar));
     }
 
-    if let Some(code) = g1_msm_dropped_pair_validation(&points, &scalars) {
-        return code;
+    if points
+        .iter()
+        .zip(scalars.iter())
+        .any(|(point, scalar)| *point != [0u64; 12] && msm_scalar_is_zero_mod_r(scalar))
+    {
+        return bls12_381_g1_msm_software(pairs, out);
     }
 
     match zisklib::msm_complete_bls12_381(&points, &scalars) {
@@ -300,7 +319,9 @@ pub fn bls12_381_g2_add(a: &[u8; 192], b: &[u8; 192], out: &mut [u8; 192]) -> u8
 
 /// EIP-2537 BLS12-381 G2 multi-scalar multiplication (precompile 0x0e).
 ///
-/// `pairs` is `n` × 224 bytes (192-byte point ‖ 32-byte scalar).
+/// `pairs` is `n` × 224 bytes (192-byte point ‖ 32-byte scalar). The software
+/// route is the G2 twin of the one in [`bls12_381_g1_msm`], for the same
+/// upstream drop-before-validation divergence.
 pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(224));
     let mut points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 224);
@@ -312,8 +333,12 @@ pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
         scalars.push(zisklib::scalar_bytes_be_to_u64_le_bls12_381(scalar));
     }
 
-    if let Some(code) = g2_msm_dropped_pair_validation(&points, &scalars) {
-        return code;
+    if points
+        .iter()
+        .zip(scalars.iter())
+        .any(|(point, scalar)| *point != [0u64; 24] && msm_scalar_is_zero_mod_r(scalar))
+    {
+        return bls12_381_g2_msm_software(pairs, out);
     }
 
     match zisklib::msm_complete_twist_bls12_381(&points, &scalars) {
@@ -377,61 +402,76 @@ pub fn bls12_381_fp2_to_g2(fp2: &[u8; 96], out: &mut [u8; 192]) -> u8 {
     }
 }
 
+/// True when an MSM scalar reduces to zero mod the BLS12-381 subgroup order
+/// r, i.e. it is one of 0, r and 2r — the drop condition of zisklib's MSM.
+/// The reduction is part of the condition: r and 2r are dropped exactly like
+/// the literal zero.
+fn msm_scalar_is_zero_mod_r(scalar: &[u64; 4]) -> bool {
+    zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar))
+}
+
+/// [`bls12_381_g1_msm`] through the software reference. The error codes are
+/// the ones the accelerated path returns for the same failure classes.
+fn bls12_381_g1_msm_software(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
+    use revm::precompile::{bls12_381::G1PointScalar, Crypto, DefaultCrypto, PrecompileHalt};
+    let mut it = pairs
+        .chunks_exact(128)
+        .map(|pair| -> Result<G1PointScalar, PrecompileHalt> {
+            Ok((
+                (
+                    pair[..48].try_into().unwrap(),
+                    pair[48..96].try_into().unwrap(),
+                ),
+                pair[96..].try_into().unwrap(),
+            ))
+        });
+    match DefaultCrypto.bls12_381_g1_msm(&mut it) {
+        Ok(sum) if sum == [0u8; 96] => {
+            out.fill(0);
+            1
+        }
+        Ok(sum) => {
+            out.copy_from_slice(&sum);
+            0
+        }
+        Err(PrecompileHalt::Bls12381G1NotOnCurve) => 3,
+        Err(PrecompileHalt::Bls12381G1NotInSubgroup) => 4,
+        Err(_) => 2,
+    }
+}
+
+/// G2 counterpart of [`bls12_381_g1_msm_software`].
+fn bls12_381_g2_msm_software(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
+    use revm::precompile::{bls12_381::G2PointScalar, Crypto, DefaultCrypto, PrecompileHalt};
+    let mut it = pairs
+        .chunks_exact(224)
+        .map(|pair| -> Result<G2PointScalar, PrecompileHalt> {
+            Ok((
+                (
+                    pair[..48].try_into().unwrap(),
+                    pair[48..96].try_into().unwrap(),
+                    pair[96..144].try_into().unwrap(),
+                    pair[144..192].try_into().unwrap(),
+                ),
+                pair[192..].try_into().unwrap(),
+            ))
+        });
+    match DefaultCrypto.bls12_381_g2_msm(&mut it) {
+        Ok(sum) if sum == [0u8; 192] => {
+            out.fill(0);
+            1
+        }
+        Ok(sum) => {
+            out.copy_from_slice(&sum);
+            0
+        }
+        Err(PrecompileHalt::Bls12381G2NotOnCurve) => 3,
+        Err(PrecompileHalt::Bls12381G2NotInSubgroup) => 4,
+        Err(_) => 2,
+    }
+}
+
 // ==================== conversion helpers ====================
-
-/// The BLS12-381 base-field modulus p as six little-endian u64 limbs.
-fn bls12_381_p_limbs() -> [u64; 6] {
-    zisklib::bytes_be_to_u64_le_fp_bls12_381(&BLS12_381_FP_BE)
-}
-
-/// Validate the MSM pairs that zisklib's G1 MSM drops before it validates
-/// them, and return the matching error code for the first invalid one.
-///
-/// zisklib skips a pair whose point is the identity or whose scalar reduces
-/// to zero mod r, and only validates the pairs that survive. The reference
-/// validates EVERY point (field, curve, subgroup) before it drops zero-scalar
-/// pairs, so a malformed point paired with a zero scalar halts the reference
-/// precompile while zisklib alone would return the identity. The identity
-/// point itself is valid under both, so only the zero-scalar drops need the
-/// check here — the surviving pairs keep zisklib's own validation.
-fn g1_msm_dropped_pair_validation(points: &[[u64; 12]], scalars: &[[u64; 4]]) -> Option<u8> {
-    let p = bls12_381_p_limbs();
-    for (point, scalar) in points.iter().zip(scalars.iter()) {
-        if *point == [0u64; 12] || !zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar)) {
-            continue;
-        }
-        if !zisklib::lt(&point[0..6], &p) || !zisklib::lt(&point[6..12], &p) {
-            return Some(2); // coordinate not in field
-        }
-        if !zisklib::is_on_curve_bls12_381(point) {
-            return Some(3); // point not on curve
-        }
-        if !zisklib::is_on_subgroup_bls12_381(point) {
-            return Some(4); // point not in subgroup
-        }
-    }
-    None
-}
-
-/// G2 counterpart of [`g1_msm_dropped_pair_validation`].
-fn g2_msm_dropped_pair_validation(points: &[[u64; 24]], scalars: &[[u64; 4]]) -> Option<u8> {
-    let p = bls12_381_p_limbs();
-    for (point, scalar) in points.iter().zip(scalars.iter()) {
-        if *point == [0u64; 24] || !zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar)) {
-            continue;
-        }
-        if point.chunks_exact(6).any(|c| !zisklib::lt(c, &p)) {
-            return Some(2); // coordinate not in field
-        }
-        if !zisklib::is_on_curve_twist_bls12_381(point) {
-            return Some(3); // point not on curve
-        }
-        if !zisklib::is_on_subgroup_twist_bls12_381(point) {
-            return Some(4); // point not in subgroup
-        }
-    }
-    None
-}
 
 /// A 32-byte big-endian field element is canonical iff it is < p.
 #[inline]
@@ -1486,8 +1526,9 @@ mod tests {
     /// The reference validates every MSM point BEFORE it drops the pairs
     /// whose scalar is zero, so an invalid point halts the precompile even
     /// when its scalar contributes nothing. zisklib's MSM drops those pairs
-    /// first, which is why the hook validates them itself. A scalar equal to
-    /// the subgroup order r covers the same drop through the reduction path.
+    /// first, which is why the hook routes such a call to the software
+    /// reference. A scalar equal to the subgroup order r covers the same drop
+    /// through the reduction path. These pins fail with the pure zisklib path.
     #[test]
     fn bls_msm_invalid_point_with_zero_scalar_halts() {
         let mut off_curve_g1 = bls_g1(3);
@@ -1514,6 +1555,47 @@ mod tests {
                 assert_eq!(ours, Err(()), "G2 scalar {s:02x?}");
                 assert_eq!(ours, reference);
             }
+        }
+    }
+
+    /// Tripwire pinning the UPSTREAM defect that motivates the software route
+    /// in `bls12_381_g1_msm`: zisklib's `msm_complete_bls12_381` drops a pair
+    /// whose scalar reduces to zero mod r before it validates the point, so
+    /// it accepts an off-curve point that the reference rejects. If a ziskos
+    /// bump makes this test FAIL, the upstream defect is fixed and the
+    /// software route (and this tripwire) can be dropped.
+    #[test]
+    fn bls_g1_msm_dropped_pair_zisklib_defect_tripwire() {
+        let mut off_curve = bls_g1(3);
+        off_curve[95] ^= 1;
+        let points = [zisklib::g1_bytes_be_to_u64_le_bls12_381(&off_curve)];
+        for s in [scalar(0), BLS12_381_FR_BE] {
+            let scalars = [zisklib::scalar_bytes_be_to_u64_le_bls12_381(&s)];
+            assert_eq!(
+                zisklib::msm_complete_bls12_381(&points, &scalars),
+                Ok([0u64; 12]),
+                "zisklib's G1 MSM validates the point of a dropped pair \
+                 (scalar {s:02x?}) — drop the software route in \
+                 bls12_381_g1_msm and this tripwire"
+            );
+        }
+    }
+
+    /// G2 counterpart of [`bls_g1_msm_dropped_pair_zisklib_defect_tripwire`].
+    #[test]
+    fn bls_g2_msm_dropped_pair_zisklib_defect_tripwire() {
+        let mut off_curve = bls_g2(3);
+        off_curve[191] ^= 1;
+        let points = [zisklib::g2_bytes_be_to_u64_le_bls12_381(&off_curve)];
+        for s in [scalar(0), BLS12_381_FR_BE] {
+            let scalars = [zisklib::scalar_bytes_be_to_u64_le_bls12_381(&s)];
+            assert_eq!(
+                zisklib::msm_complete_twist_bls12_381(&points, &scalars),
+                Ok([0u64; 24]),
+                "zisklib's G2 MSM validates the point of a dropped pair \
+                 (scalar {s:02x?}) — drop the software route in \
+                 bls12_381_g2_msm and this tripwire"
+            );
         }
     }
 
