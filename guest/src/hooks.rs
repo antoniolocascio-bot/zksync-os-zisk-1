@@ -22,6 +22,14 @@
 //!   left-zero-padded to `modulus.len()`, returns the written length.
 //! - `secp256r1_verify`: RIP-7212 semantics (r, s ∈ [1, n-1], pk a canonical
 //!   non-identity curve point, high-s accepted).
+//! - `blake2b_compress`: RFC 7693 compression function F; updates `h` in place.
+//! - `verify_kzg_proof`: EIP-4844 point evaluation; true = the proof holds.
+//! - `bls12_381_*`: EIP-2537 semantics. Points are big-endian coordinate
+//!   strings (G1 = x ‖ y, 48 bytes each; G2 = x_c0 ‖ x_c1 ‖ y_c0 ‖ y_c1),
+//!   infinity = all zeros; MSM pairs append a 32-byte big-endian scalar.
+//!   Return 0 = success, 1 = success-infinity (pairing check: 1 = product is
+//!   not one), 2 and above = validation error (any error halts the
+//!   precompile, exactly like the reference's parse errors).
 
 use ziskos::zisklib;
 
@@ -31,6 +39,15 @@ const BN254_FP_BE: [u8; 32] = [
     0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
     0x5d, 0x97, 0x81, 0x6a, 0x91, 0x68, 0x71, 0xca, 0x8d, 0x3c, 0x20, 0x8c, 0x16, 0xd8, 0x7c,
     0xfd, 0x47,
+];
+
+/// BLS12-381 base-field modulus p, big-endian:
+/// 4002409555221667393417789825735904156556882819939007885332058136124031650490
+/// 837864442687629129015664037894272559787.
+const BLS12_381_FP_BE: [u8; 48] = [
+    0x1a, 0x01, 0x11, 0xea, 0x39, 0x7f, 0xe6, 0x9a, 0x4b, 0x1b, 0xa7, 0xb6, 0x43, 0x4b, 0xac, 0xd7,
+    0x64, 0x77, 0x4b, 0x84, 0xf3, 0x85, 0x12, 0xbf, 0x67, 0x30, 0xd2, 0xa0, 0xf6, 0xb0, 0xf6, 0x24,
+    0x1e, 0xab, 0xff, 0xfe, 0xb1, 0x53, 0xff, 0xff, 0xb9, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xaa, 0xab,
 ];
 
 /// SHA-256 digest via the ZiSK `sha256f` compression circuit (software
@@ -186,7 +203,235 @@ pub fn secp256r1_verify(msg: &[u8; 32], sig: &[u8; 64], pk: &[u8; 64]) -> bool {
     zisklib::ecdsa_verify_secp256r1(&pk_limbs, &z, &r, &s)
 }
 
+/// RFC 7693 BLAKE2b compression function F, the core of the EIP-152
+/// precompile (0x09).
+///
+/// Backed by the ZiSK `blake2b_round` syscall via `zisklib::blake2b_compress`,
+/// which implements the round schedule and the final `h ^= v_lo ^ v_hi` fold
+/// exactly as the reference does.
+#[inline]
+pub fn blake2b_compress(rounds: u32, h: &mut [u64; 8], m: &[u64; 16], t: &[u64; 2], f: bool) {
+    zisklib::blake2b_compress(rounds, h, m, t, f);
+}
+
+/// EIP-4844 KZG point evaluation for the `pointEvaluation` precompile (0x0a).
+///
+/// `z`/`y` are 32-byte big-endian scalars, `commitment`/`proof` are 48-byte
+/// compressed G1 points. Returns true iff the proof holds for the trusted
+/// setup that zisklib embeds (the Ethereum mainnet ceremony's τ·G2, the same
+/// setup the reference's arkworks backend loads).
+#[inline]
+pub fn verify_kzg_proof(
+    z: &[u8; 32],
+    y: &[u8; 32],
+    commitment: &[u8; 48],
+    proof: &[u8; 48],
+) -> bool {
+    zisklib::verify_kzg_proof(z, y, commitment, proof)
+}
+
+/// EIP-2537 BLS12-381 G1 addition (precompile 0x0b).
+///
+/// zisklib validates coordinate canonicality and curve membership and skips
+/// the subgroup check, which is the exact G1ADD rule.
+pub fn bls12_381_g1_add(a: &[u8; 96], b: &[u8; 96], out: &mut [u8; 96]) -> u8 {
+    let a = zisklib::g1_bytes_be_to_u64_le_bls12_381(a);
+    let b = zisklib::g1_bytes_be_to_u64_le_bls12_381(b);
+    match zisklib::add_complete_bls12_381(&a, &b) {
+        Ok(sum) if sum == [0u64; 12] => {
+            out.fill(0);
+            1
+        }
+        Ok(sum) => {
+            zisklib::g1_u64_le_to_bytes_be_bls12_381(&sum, out);
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// EIP-2537 BLS12-381 G1 multi-scalar multiplication (precompile 0x0c).
+///
+/// `pairs` is `n` × 128 bytes (96-byte point ‖ 32-byte scalar).
+pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
+    debug_assert!(pairs.len().is_multiple_of(128));
+    let mut points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 128);
+    let mut scalars: Vec<[u64; 4]> = Vec::with_capacity(pairs.len() / 128);
+    for pair in pairs.chunks_exact(128) {
+        let point: &[u8; 96] = pair[..96].try_into().unwrap();
+        let scalar: &[u8; 32] = pair[96..].try_into().unwrap();
+        points.push(zisklib::g1_bytes_be_to_u64_le_bls12_381(point));
+        scalars.push(zisklib::scalar_bytes_be_to_u64_le_bls12_381(scalar));
+    }
+
+    if let Some(code) = g1_msm_dropped_pair_validation(&points, &scalars) {
+        return code;
+    }
+
+    match zisklib::msm_complete_bls12_381(&points, &scalars) {
+        Ok(sum) if sum == [0u64; 12] => {
+            out.fill(0);
+            1
+        }
+        Ok(sum) => {
+            zisklib::g1_u64_le_to_bytes_be_bls12_381(&sum, out);
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// EIP-2537 BLS12-381 G2 addition (precompile 0x0d).
+pub fn bls12_381_g2_add(a: &[u8; 192], b: &[u8; 192], out: &mut [u8; 192]) -> u8 {
+    let a = zisklib::g2_bytes_be_to_u64_le_bls12_381(a);
+    let b = zisklib::g2_bytes_be_to_u64_le_bls12_381(b);
+    match zisklib::add_complete_twist_bls12_381(&a, &b) {
+        Ok(sum) if sum == [0u64; 24] => {
+            out.fill(0);
+            1
+        }
+        Ok(sum) => {
+            zisklib::g2_u64_le_to_bytes_be_bls12_381(&sum, out);
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// EIP-2537 BLS12-381 G2 multi-scalar multiplication (precompile 0x0e).
+///
+/// `pairs` is `n` × 224 bytes (192-byte point ‖ 32-byte scalar).
+pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
+    debug_assert!(pairs.len().is_multiple_of(224));
+    let mut points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 224);
+    let mut scalars: Vec<[u64; 4]> = Vec::with_capacity(pairs.len() / 224);
+    for pair in pairs.chunks_exact(224) {
+        let point: &[u8; 192] = pair[..192].try_into().unwrap();
+        let scalar: &[u8; 32] = pair[192..].try_into().unwrap();
+        points.push(zisklib::g2_bytes_be_to_u64_le_bls12_381(point));
+        scalars.push(zisklib::scalar_bytes_be_to_u64_le_bls12_381(scalar));
+    }
+
+    if let Some(code) = g2_msm_dropped_pair_validation(&points, &scalars) {
+        return code;
+    }
+
+    match zisklib::msm_complete_twist_bls12_381(&points, &scalars) {
+        Ok(sum) if sum == [0u64; 24] => {
+            out.fill(0);
+            1
+        }
+        Ok(sum) => {
+            zisklib::g2_u64_le_to_bytes_be_bls12_381(&sum, out);
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// EIP-2537 BLS12-381 pairing check (precompile 0x0f).
+///
+/// `pairs` is `n` × 288 bytes (96-byte G1 ‖ 192-byte G2). Returns 0 when the
+/// product of pairings is one, 1 when it is not.
+pub fn bls12_381_pairing_check(pairs: &[u8]) -> u8 {
+    debug_assert!(pairs.len().is_multiple_of(288));
+    let mut g1_points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 288);
+    let mut g2_points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 288);
+    for pair in pairs.chunks_exact(288) {
+        let g1: &[u8; 96] = pair[..96].try_into().unwrap();
+        let g2: &[u8; 192] = pair[96..].try_into().unwrap();
+        g1_points.push(zisklib::g1_bytes_be_to_u64_le_bls12_381(g1));
+        g2_points.push(zisklib::g2_bytes_be_to_u64_le_bls12_381(g2));
+    }
+
+    match zisklib::pairing_check_bls12_381(&g1_points, &g2_points) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(code) => code,
+    }
+}
+
+/// EIP-2537 BLS12-381 map Fp to G1 (precompile 0x10).
+pub fn bls12_381_fp_to_g1(fp: &[u8; 48], out: &mut [u8; 96]) -> u8 {
+    let u = zisklib::bytes_be_to_u64_le_fp_bls12_381(fp);
+    match zisklib::map_to_curve_g1_bls12_381(&u) {
+        Ok(point) => {
+            zisklib::g1_u64_le_to_bytes_be_bls12_381(&point, out);
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// EIP-2537 BLS12-381 map Fp2 to G2 (precompile 0x11).
+///
+/// `fp2` is c0 ‖ c1, each a 48-byte big-endian field element.
+pub fn bls12_381_fp2_to_g2(fp2: &[u8; 96], out: &mut [u8; 192]) -> u8 {
+    let u = zisklib::bytes_be_to_u64_le_fp2_bls12_381(fp2);
+    match zisklib::map_to_curve_g2_bls12_381(&u) {
+        Ok(point) => {
+            zisklib::g2_u64_le_to_bytes_be_bls12_381(&point, out);
+            0
+        }
+        Err(code) => code,
+    }
+}
+
 // ==================== conversion helpers ====================
+
+/// The BLS12-381 base-field modulus p as six little-endian u64 limbs.
+fn bls12_381_p_limbs() -> [u64; 6] {
+    zisklib::bytes_be_to_u64_le_fp_bls12_381(&BLS12_381_FP_BE)
+}
+
+/// Validate the MSM pairs that zisklib's G1 MSM drops before it validates
+/// them, and return the matching error code for the first invalid one.
+///
+/// zisklib skips a pair whose point is the identity or whose scalar reduces
+/// to zero mod r, and only validates the pairs that survive. The reference
+/// validates EVERY point (field, curve, subgroup) before it drops zero-scalar
+/// pairs, so a malformed point paired with a zero scalar halts the reference
+/// precompile while zisklib alone would return the identity. The identity
+/// point itself is valid under both, so only the zero-scalar drops need the
+/// check here — the surviving pairs keep zisklib's own validation.
+fn g1_msm_dropped_pair_validation(points: &[[u64; 12]], scalars: &[[u64; 4]]) -> Option<u8> {
+    let p = bls12_381_p_limbs();
+    for (point, scalar) in points.iter().zip(scalars.iter()) {
+        if *point == [0u64; 12] || !zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar)) {
+            continue;
+        }
+        if !zisklib::lt(&point[0..6], &p) || !zisklib::lt(&point[6..12], &p) {
+            return Some(2); // coordinate not in field
+        }
+        if !zisklib::is_on_curve_bls12_381(point) {
+            return Some(3); // point not on curve
+        }
+        if !zisklib::is_on_subgroup_bls12_381(point) {
+            return Some(4); // point not in subgroup
+        }
+    }
+    None
+}
+
+/// G2 counterpart of [`g1_msm_dropped_pair_validation`].
+fn g2_msm_dropped_pair_validation(points: &[[u64; 24]], scalars: &[[u64; 4]]) -> Option<u8> {
+    let p = bls12_381_p_limbs();
+    for (point, scalar) in points.iter().zip(scalars.iter()) {
+        if *point == [0u64; 24] || !zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar)) {
+            continue;
+        }
+        if point.chunks_exact(6).any(|c| !zisklib::lt(c, &p)) {
+            return Some(2); // coordinate not in field
+        }
+        if !zisklib::is_on_curve_twist_bls12_381(point) {
+            return Some(3); // point not on curve
+        }
+        if !zisklib::is_on_subgroup_twist_bls12_381(point) {
+            return Some(4); // point not in subgroup
+        }
+    }
+    None
+}
 
 /// A 32-byte big-endian field element is canonical iff it is < p.
 #[inline]
@@ -265,7 +510,10 @@ fn u256_le_to_bytes_be(limbs: &[zisklib::U256], out: &mut [u8]) {
 mod tests {
     use super::*;
     use alloy_primitives::hex;
-    use revm::precompile::{Crypto, DefaultCrypto};
+    use revm::precompile::{
+        bls12_381::{G1Point, G1PointScalar, G2Point, G2PointScalar},
+        Crypto, DefaultCrypto,
+    };
 
     /// BN254 group order r, big-endian.
     const BN254_FR_BE: [u8; 32] = hex!(
@@ -885,6 +1133,503 @@ mod tests {
             "zisklib now verifies x = 0 public keys correctly — drop the \
              software route in secp256r1_verify and this tripwire"
         );
+    }
+
+    // ---------- BLAKE2b ----------
+
+    fn blake2b_both(
+        rounds: u32,
+        h: &[u64; 8],
+        m: &[u64; 16],
+        t: &[u64; 2],
+        f: bool,
+    ) -> ([u64; 8], [u64; 8]) {
+        let mut ours = *h;
+        blake2b_compress(rounds, &mut ours, m, t, f);
+        let mut reference = *h;
+        DefaultCrypto.blake2_compress(rounds, &mut reference, m, t, f);
+        assert_eq!(ours, reference, "blake2b mismatch (rounds {rounds}, f {f})");
+        (ours, reference)
+    }
+
+    #[test]
+    fn blake2b_eip152_vector() {
+        // EIP-152 vector 4: the "abc" digest state after one 12-round
+        // compression of the BLAKE2b-512 initial state.
+        let mut h = [
+            0x6a09e667f3bcc908 ^ 0x0101_0040,
+            0xbb67ae8584caa73b,
+            0x3c6ef372fe94f82b,
+            0xa54ff53a5f1d36f1,
+            0x510e527fade682d1,
+            0x9b05688c2b3e6c1f,
+            0x1f83d9abfb41bd6b,
+            0x5be0cd19137e2179,
+        ];
+        let mut m = [0u64; 16];
+        m[0] = u64::from_le_bytes(*b"abc\0\0\0\0\0");
+        let (ours, _) = blake2b_both(12, &h, &m, &[3, 0], true);
+        h = ours;
+        let mut digest = [0u8; 64];
+        for (i, word) in h.iter().enumerate() {
+            digest[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
+        }
+        assert_eq!(
+            digest,
+            hex!(
+                "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1"
+                "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923"
+            )
+        );
+    }
+
+    #[test]
+    fn blake2b_matches_reference_across_round_counts_and_flags() {
+        // Deterministic patterned state/message; the round count drives the
+        // sigma schedule wrap-around (r % 10), so cover past one full cycle.
+        let h: [u64; 8] = core::array::from_fn(|i| (i as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15));
+        let m: [u64; 16] =
+            core::array::from_fn(|i| (i as u64 + 7).wrapping_mul(0xc2b2ae3d27d4eb4f));
+        for rounds in [0u32, 1, 9, 10, 11, 12, 25] {
+            for f in [false, true] {
+                blake2b_both(rounds, &h, &m, &[0x0123_4567, 0x89ab_cdef], f);
+            }
+        }
+    }
+
+    // ---------- KZG point evaluation ----------
+
+    fn kzg_both(z: &[u8; 32], y: &[u8; 32], commitment: &[u8; 48], proof: &[u8; 48]) -> bool {
+        let ours = verify_kzg_proof(z, y, commitment, proof);
+        let reference = DefaultCrypto
+            .verify_kzg_proof(z, y, commitment, proof)
+            .is_ok();
+        assert_eq!(ours, reference, "kzg verdict mismatch");
+        ours
+    }
+
+    #[test]
+    fn kzg_mainnet_vector_and_tampering() {
+        // c-kzg-4844 `verify_kzg_proof_case_correct_proof_4_4` (mainnet
+        // trusted setup), the vector REVM's own precompile test pins.
+        let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
+        let y = hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");
+        let commitment = hex!(
+            "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca2"
+            "5f26936857bc3a7c2539ea8ec3a952b7"
+        );
+        let proof = hex!(
+            "a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc216074"
+            "4faf0070725e00b60ad9a026a15b1a8c"
+        );
+        assert!(kzg_both(&z, &y, &commitment, &proof));
+
+        // Any single tamper must flip to invalid.
+        let mut bad_y = y;
+        bad_y[31] ^= 1;
+        assert!(!kzg_both(&z, &bad_y, &commitment, &proof));
+        let mut bad_proof = proof;
+        bad_proof[47] ^= 1;
+        assert!(!kzg_both(&z, &y, &commitment, &bad_proof));
+    }
+
+    #[test]
+    fn kzg_infinity_commitment_cases() {
+        // Commitment and proof both the compressed point at infinity: the
+        // zero polynomial evaluates to zero everywhere.
+        let mut infinity = [0u8; 48];
+        infinity[0] = 0xc0; // compressed-point encoding of the identity
+        let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
+        assert!(kzg_both(&z, &[0u8; 32], &infinity, &infinity));
+
+        // Same commitment with a non-zero claimed evaluation must fail.
+        let y = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001");
+        assert!(!kzg_both(&[0u8; 32], &y, &infinity, &infinity));
+    }
+
+    // ---------- BLS12-381 ----------
+
+    /// A valid G1 subgroup point, built through the reference map-to-curve so
+    /// the test needs no hardcoded generator.
+    fn bls_g1(seed: u8) -> [u8; 96] {
+        let mut fp = [0u8; 48];
+        fp[47] = seed;
+        DefaultCrypto.bls12_381_fp_to_g1(&fp).unwrap()
+    }
+
+    /// A valid G2 subgroup point (see [`bls_g1`]).
+    fn bls_g2(seed: u8) -> [u8; 192] {
+        let mut c0 = [0u8; 48];
+        c0[47] = seed;
+        DefaultCrypto.bls12_381_fp2_to_g2((c0, [0u8; 48])).unwrap()
+    }
+
+    /// Negate a G1 point: -(x, y) = (x, p - y).
+    fn bls_g1_neg(p: &[u8; 96]) -> [u8; 96] {
+        let mut out = *p;
+        out[48..].copy_from_slice(&fp_neg(p[48..].try_into().unwrap()));
+        out
+    }
+
+    /// p - x over the BLS12-381 base field, big-endian (x is non-zero).
+    fn fp_neg(x: &[u8; 48]) -> [u8; 48] {
+        let mut out = [0u8; 48];
+        let mut borrow = 0i16;
+        for i in (0..48).rev() {
+            let mut d = BLS12_381_FP_BE[i] as i16 - x[i] as i16 - borrow;
+            borrow = if d < 0 {
+                d += 256;
+                1
+            } else {
+                0
+            };
+            out[i] = d as u8;
+        }
+        assert_eq!(borrow, 0);
+        out
+    }
+
+    fn split_g1(p: &[u8; 96]) -> G1Point {
+        (p[..48].try_into().unwrap(), p[48..].try_into().unwrap())
+    }
+
+    fn split_g2(p: &[u8; 192]) -> G2Point {
+        (
+            p[..48].try_into().unwrap(),
+            p[48..96].try_into().unwrap(),
+            p[96..144].try_into().unwrap(),
+            p[144..].try_into().unwrap(),
+        )
+    }
+
+    fn bls_g1_add_both(a: &[u8; 96], b: &[u8; 96]) -> (Result<[u8; 96], ()>, Result<[u8; 96], ()>) {
+        let mut out = [0u8; 96];
+        let ours = match bls12_381_g1_add(a, b, &mut out) {
+            0 | 1 => Ok(out),
+            _ => Err(()),
+        };
+        let reference = DefaultCrypto
+            .bls12_381_g1_add(split_g1(a), split_g1(b))
+            .map_err(|_| ());
+        (ours, reference)
+    }
+
+    fn bls_g2_add_both(
+        a: &[u8; 192],
+        b: &[u8; 192],
+    ) -> (Result<[u8; 192], ()>, Result<[u8; 192], ()>) {
+        let mut out = [0u8; 192];
+        let ours = match bls12_381_g2_add(a, b, &mut out) {
+            0 | 1 => Ok(out),
+            _ => Err(()),
+        };
+        let reference = DefaultCrypto
+            .bls12_381_g2_add(split_g2(a), split_g2(b))
+            .map_err(|_| ());
+        (ours, reference)
+    }
+
+    fn bls_g1_msm_both(
+        pairs: &[([u8; 96], [u8; 32])],
+    ) -> (Result<[u8; 96], ()>, Result<[u8; 96], ()>) {
+        let mut flat = Vec::new();
+        for (point, scalar) in pairs {
+            flat.extend_from_slice(point);
+            flat.extend_from_slice(scalar);
+        }
+        let mut out = [0u8; 96];
+        let ours = match bls12_381_g1_msm(&flat, &mut out) {
+            0 | 1 => Ok(out),
+            _ => Err(()),
+        };
+        let collected: Vec<G1PointScalar> = pairs.iter().map(|(p, s)| (split_g1(p), *s)).collect();
+        let mut it = collected.into_iter().map(Ok);
+        let reference = DefaultCrypto.bls12_381_g1_msm(&mut it).map_err(|_| ());
+        (ours, reference)
+    }
+
+    fn bls_g2_msm_both(
+        pairs: &[([u8; 192], [u8; 32])],
+    ) -> (Result<[u8; 192], ()>, Result<[u8; 192], ()>) {
+        let mut flat = Vec::new();
+        for (point, scalar) in pairs {
+            flat.extend_from_slice(point);
+            flat.extend_from_slice(scalar);
+        }
+        let mut out = [0u8; 192];
+        let ours = match bls12_381_g2_msm(&flat, &mut out) {
+            0 | 1 => Ok(out),
+            _ => Err(()),
+        };
+        let collected: Vec<G2PointScalar> = pairs.iter().map(|(p, s)| (split_g2(p), *s)).collect();
+        let mut it = collected.into_iter().map(Ok);
+        let reference = DefaultCrypto.bls12_381_g2_msm(&mut it).map_err(|_| ());
+        (ours, reference)
+    }
+
+    fn bls_pairing_both(pairs: &[([u8; 96], [u8; 192])]) -> (Result<bool, ()>, Result<bool, ()>) {
+        let mut flat = Vec::new();
+        for (g1, g2) in pairs {
+            flat.extend_from_slice(g1);
+            flat.extend_from_slice(g2);
+        }
+        let ours = match bls12_381_pairing_check(&flat) {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(()),
+        };
+        let ref_pairs: Vec<(G1Point, G2Point)> = pairs
+            .iter()
+            .map(|(g1, g2)| (split_g1(g1), split_g2(g2)))
+            .collect();
+        let reference = DefaultCrypto
+            .bls12_381_pairing_check(&ref_pairs)
+            .map_err(|_| ());
+        (ours, reference)
+    }
+
+    fn scalar(v: u64) -> [u8; 32] {
+        let mut s = [0u8; 32];
+        s[24..].copy_from_slice(&v.to_be_bytes());
+        s
+    }
+
+    /// BLS12-381 subgroup order r, big-endian.
+    const BLS12_381_FR_BE: [u8; 32] =
+        hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001");
+
+    #[test]
+    fn bls_g1_add_matches_reference() {
+        let p = bls_g1(1);
+        let q = bls_g1(2);
+        let zero = [0u8; 96];
+
+        for (a, b) in [
+            (p, q),
+            (p, p),
+            (p, zero),
+            (zero, p),
+            (zero, zero),
+            (p, bls_g1_neg(&p)),
+        ] {
+            let (ours, reference) = bls_g1_add_both(&a, &b);
+            assert!(ours.is_ok());
+            assert_eq!(ours, reference);
+        }
+
+        // Off-curve and non-canonical inputs must halt on both sides.
+        let mut off_curve = p;
+        off_curve[95] ^= 1;
+        let (ours, reference) = bls_g1_add_both(&off_curve, &q);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+
+        let mut non_canonical = p;
+        non_canonical[..48].copy_from_slice(&BLS12_381_FP_BE);
+        let (ours, reference) = bls_g1_add_both(&non_canonical, &q);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+    }
+
+    #[test]
+    fn bls_g2_add_matches_reference() {
+        let p = bls_g2(1);
+        let q = bls_g2(2);
+        let zero = [0u8; 192];
+
+        for (a, b) in [(p, q), (p, p), (p, zero), (zero, p), (zero, zero)] {
+            let (ours, reference) = bls_g2_add_both(&a, &b);
+            assert!(ours.is_ok());
+            assert_eq!(ours, reference);
+        }
+
+        let mut off_curve = p;
+        off_curve[191] ^= 1;
+        let (ours, reference) = bls_g2_add_both(&off_curve, &q);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+
+        let mut non_canonical = p;
+        non_canonical[48..96].copy_from_slice(&BLS12_381_FP_BE);
+        let (ours, reference) = bls_g2_add_both(&non_canonical, &q);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+    }
+
+    #[test]
+    fn bls_g1_msm_matches_reference() {
+        let p = bls_g1(3);
+        let q = bls_g1(5);
+
+        for pairs in [
+            vec![(p, scalar(1))],
+            vec![(p, scalar(2))],
+            vec![(p, scalar(0))],
+            vec![(p, BLS12_381_FR_BE)],
+            vec![(p, [0xff; 32])],
+            vec![(p, scalar(7)), (q, scalar(11))],
+            vec![([0u8; 96], scalar(9)), (q, scalar(4))],
+        ] {
+            let (ours, reference) = bls_g1_msm_both(&pairs);
+            assert!(ours.is_ok());
+            assert_eq!(ours, reference);
+        }
+
+        // Off-curve point, non-zero scalar.
+        let mut off_curve = p;
+        off_curve[95] ^= 1;
+        let (ours, reference) = bls_g1_msm_both(&[(off_curve, scalar(3))]);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+    }
+
+    /// The reference validates every MSM point BEFORE it drops the pairs
+    /// whose scalar is zero, so an invalid point halts the precompile even
+    /// when its scalar contributes nothing. zisklib's MSM drops those pairs
+    /// first, which is why the hook validates them itself. A scalar equal to
+    /// the subgroup order r covers the same drop through the reduction path.
+    #[test]
+    fn bls_msm_invalid_point_with_zero_scalar_halts() {
+        let mut off_curve_g1 = bls_g1(3);
+        off_curve_g1[95] ^= 1;
+        let mut non_canonical_g1 = bls_g1(3);
+        non_canonical_g1[..48].copy_from_slice(&BLS12_381_FP_BE);
+
+        for point in [off_curve_g1, non_canonical_g1] {
+            for s in [scalar(0), BLS12_381_FR_BE] {
+                let (ours, reference) = bls_g1_msm_both(&[(point, s), (bls_g1(5), scalar(2))]);
+                assert_eq!(ours, Err(()), "G1 scalar {s:02x?}");
+                assert_eq!(ours, reference);
+            }
+        }
+
+        let mut off_curve_g2 = bls_g2(3);
+        off_curve_g2[191] ^= 1;
+        let mut non_canonical_g2 = bls_g2(3);
+        non_canonical_g2[48..96].copy_from_slice(&BLS12_381_FP_BE);
+
+        for point in [off_curve_g2, non_canonical_g2] {
+            for s in [scalar(0), BLS12_381_FR_BE] {
+                let (ours, reference) = bls_g2_msm_both(&[(point, s), (bls_g2(5), scalar(2))]);
+                assert_eq!(ours, Err(()), "G2 scalar {s:02x?}");
+                assert_eq!(ours, reference);
+            }
+        }
+    }
+
+    #[test]
+    fn bls_g2_msm_matches_reference() {
+        let p = bls_g2(3);
+        let q = bls_g2(5);
+
+        for pairs in [
+            vec![(p, scalar(1))],
+            vec![(p, scalar(2))],
+            vec![(p, scalar(0))],
+            vec![(p, BLS12_381_FR_BE)],
+            vec![(p, scalar(7)), (q, scalar(11))],
+            vec![([0u8; 192], scalar(9)), (q, scalar(4))],
+        ] {
+            let (ours, reference) = bls_g2_msm_both(&pairs);
+            assert!(ours.is_ok());
+            assert_eq!(ours, reference);
+        }
+
+        let mut off_curve = p;
+        off_curve[191] ^= 1;
+        let (ours, reference) = bls_g2_msm_both(&[(off_curve, scalar(3))]);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+    }
+
+    #[test]
+    fn bls_pairing_check_matches_reference() {
+        let p = bls_g1(1);
+        let q = bls_g2(1);
+        let zero_g1 = [0u8; 96];
+        let zero_g2 = [0u8; 192];
+
+        // e(P, Q) != 1 for a single non-degenerate pair.
+        let (ours, reference) = bls_pairing_both(&[(p, q)]);
+        assert_eq!(ours, Ok(false));
+        assert_eq!(ours, reference);
+
+        // e(P, Q) · e(-P, Q) == 1.
+        let (ours, reference) = bls_pairing_both(&[(p, q), (bls_g1_neg(&p), q)]);
+        assert_eq!(ours, Ok(true));
+        assert_eq!(ours, reference);
+
+        // Pairs holding an infinity point contribute one.
+        for pair in [(zero_g1, q), (p, zero_g2), (zero_g1, zero_g2)] {
+            let (ours, reference) = bls_pairing_both(&[pair]);
+            assert_eq!(ours, Ok(true));
+            assert_eq!(ours, reference);
+        }
+
+        // Off-curve and non-canonical inputs halt, including next to an
+        // infinity partner.
+        let mut off_curve_g1 = p;
+        off_curve_g1[95] ^= 1;
+        let (ours, reference) = bls_pairing_both(&[(off_curve_g1, q)]);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+
+        let mut non_canonical_g1 = p;
+        non_canonical_g1[..48].copy_from_slice(&BLS12_381_FP_BE);
+        let (ours, reference) = bls_pairing_both(&[(non_canonical_g1, zero_g2)]);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+
+        let mut off_curve_g2 = q;
+        off_curve_g2[191] ^= 1;
+        let (ours, reference) = bls_pairing_both(&[(zero_g1, off_curve_g2)]);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+    }
+
+    #[test]
+    fn bls_map_to_curve_matches_reference() {
+        for seed in [0u8, 1, 2, 0xff] {
+            let mut fp = [0u8; 48];
+            fp[47] = seed;
+            fp[0] = seed % 0x1a; // exercise the high limbs, staying under p
+
+            let mut out = [0u8; 96];
+            let ours = match bls12_381_fp_to_g1(&fp, &mut out) {
+                0 => Ok(out),
+                _ => Err(()),
+            };
+            let reference = DefaultCrypto.bls12_381_fp_to_g1(&fp).map_err(|_| ());
+            assert!(ours.is_ok(), "fp_to_g1 seed {seed}");
+            assert_eq!(ours, reference, "fp_to_g1 seed {seed}");
+
+            let mut fp2 = [0u8; 96];
+            fp2[..48].copy_from_slice(&fp);
+            fp2[95] = seed.wrapping_add(1);
+            let mut out = [0u8; 192];
+            let ours = match bls12_381_fp2_to_g2(&fp2, &mut out) {
+                0 => Ok(out),
+                _ => Err(()),
+            };
+            let reference = DefaultCrypto
+                .bls12_381_fp2_to_g2((fp2[..48].try_into().unwrap(), fp2[48..].try_into().unwrap()))
+                .map_err(|_| ());
+            assert!(ours.is_ok(), "fp2_to_g2 seed {seed}");
+            assert_eq!(ours, reference, "fp2_to_g2 seed {seed}");
+        }
+
+        // A field element equal to p is not canonical; both sides halt.
+        let mut out = [0u8; 96];
+        assert_ne!(bls12_381_fp_to_g1(&BLS12_381_FP_BE, &mut out), 0);
+        assert!(DefaultCrypto.bls12_381_fp_to_g1(&BLS12_381_FP_BE).is_err());
+
+        let mut fp2 = [0u8; 96];
+        fp2[48..].copy_from_slice(&BLS12_381_FP_BE);
+        let mut out = [0u8; 192];
+        assert_ne!(bls12_381_fp2_to_g2(&fp2, &mut out), 0);
+        assert!(DefaultCrypto
+            .bls12_381_fp2_to_g2(([0u8; 48], BLS12_381_FP_BE))
+            .is_err());
     }
 
     #[test]
