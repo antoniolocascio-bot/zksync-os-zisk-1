@@ -14,6 +14,10 @@ waivers remain. Any other outcome is a regression or a new finding. The count
 spans 35 of the 36 chunks; `static_state_tests` needs a run of its own (see
 **Known sharp edges**).
 
+The AtlasV4/0.4.0 line has its own steady state to establish. Its runs take
+guest ELF `c2c4ed5b…`, which wires the EIP-152, EIP-4844 point-evaluation
+and EIP-2537 precompiles that AtlasV4 activates.
+
 ## Architecture
 
 ```
@@ -119,8 +123,7 @@ emulation status, detail.
 - At the AtlasV4/0.4.0 guest bump: re-establish steady state against the
   0.4.0 line — its semantics drift from v31 (blake2s-merkle header
   tx/receipt roots, Pectra fee/precompile semantics), so expect a fresh
-  divergence-triage round and re-visit the blake2f/KZG/bls stub coverage
-  question.
+  divergence-triage round.
 
 ## Known sharp edges
 
