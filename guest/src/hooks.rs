@@ -418,29 +418,51 @@ pub fn bls12_381_pairing_check(pairs: &[u8]) -> u8 {
     }
 }
 
-/// EIP-2537 BLS12-381 map Fp to G1 (precompile 0x10).
+/// EIP-2537 BLS12-381 map Fp to G1 (precompile 0x10), through the software
+/// reference (`DefaultCrypto`).
+///
+/// zisklib clears the cofactor with the raw curve syscalls, which have no
+/// identity encoding. A field element whose isogeny image is the identity —
+/// the kernel values the EIP-2537 fixtures carry, and the elements that map
+/// to infinity — therefore divides by zero behind a non-unwinding
+/// `extern "C"` shim, which raises SIGABRT in the guest and in the prover
+/// witness generator. A kernel element is much harder to detect in the input
+/// than a small-order point, and these two precompiles carry the least
+/// traffic of the EIP-2537 set, so the whole hook takes the software route.
+/// Restore the accelerated path when upstream clears the cofactor with the
+/// complete formulas (see the tripwire test below).
 pub fn bls12_381_fp_to_g1(fp: &[u8; 48], out: &mut [u8; 96]) -> u8 {
-    let u = zisklib::bytes_be_to_u64_le_fp_bls12_381(fp);
-    match zisklib::map_to_curve_g1_bls12_381(&u) {
+    use revm::precompile::{Crypto, DefaultCrypto};
+    match DefaultCrypto.bls12_381_fp_to_g1(fp) {
         Ok(point) => {
-            zisklib::g1_u64_le_to_bytes_be_bls12_381(&point, out);
+            out.copy_from_slice(&point);
             0
         }
-        Err(code) => code,
+        Err(_) => 1,
     }
 }
 
-/// EIP-2537 BLS12-381 map Fp2 to G2 (precompile 0x11).
+/// EIP-2537 BLS12-381 map Fp2 to G2 (precompile 0x11), through the software
+/// reference (`DefaultCrypto`).
 ///
-/// `fp2` is c0 ‖ c1, each a 48-byte big-endian field element.
+/// `fp2` is c0 ‖ c1, each a 48-byte big-endian field element. The twist
+/// counterpart of the cofactor clearing in [`bls12_381_fp_to_g1`] divides
+/// nothing, because zisklib's `inv_fp2_bls12_381` maps zero to zero. Its
+/// addition formula returns a value off the curve when one operand is the
+/// identity and the other is not, which is the shape an isogeny image of
+/// small order takes, so the G2 map holds to the software route for that
+/// class.
 pub fn bls12_381_fp2_to_g2(fp2: &[u8; 96], out: &mut [u8; 192]) -> u8 {
-    let u = zisklib::bytes_be_to_u64_le_fp2_bls12_381(fp2);
-    match zisklib::map_to_curve_g2_bls12_381(&u) {
+    use revm::precompile::{Crypto, DefaultCrypto};
+    match DefaultCrypto.bls12_381_fp2_to_g2((
+        fp2[..48].try_into().unwrap(),
+        fp2[48..].try_into().unwrap(),
+    )) {
         Ok(point) => {
-            zisklib::g2_u64_le_to_bytes_be_bls12_381(&point, out);
+            out.copy_from_slice(&point);
             0
         }
-        Err(code) => code,
+        Err(_) => 1,
     }
 }
 
@@ -1953,6 +1975,31 @@ mod tests {
             .is_err());
     }
 
+    /// An EIP-2537 fixture element of the isogeny kernel: the isogeny that
+    /// closes the map to G1 sends it to the identity.
+    const BLS_ISOGENY_KERNEL_FP: [u8; 48] = hex!(
+        "0b3f3f9519ff3ab349e4ffc214f99998a697b02358fcfe44830e29129f58d6f9"
+        "154a23fd14dfa660a75d4aaec9b607c3"
+    );
+    /// The EIP-2537 fixture element that the map sends to infinity.
+    const BLS_FP_MAP_TO_INFINITY: [u8; 48] = hex!(
+        "053287da0e0815dc9541794c8b35ddc31ba75821e2bf11e238e9978812a76828"
+        "8b979af4a204a95c1e79dfedd252a3c5"
+    );
+
+    /// The two fixture classes whose cofactor clearing meets the identity.
+    /// The map is valid on both: it returns the point at infinity. These
+    /// pins abort with the pure zisklib path.
+    #[test]
+    fn bls_map_to_curve_identity_image_values_match_reference() {
+        for fp in [BLS_ISOGENY_KERNEL_FP, BLS_FP_MAP_TO_INFINITY] {
+            let mut out = [0u8; 96];
+            assert_eq!(bls12_381_fp_to_g1(&fp, &mut out), 0, "fp {fp:02x?}");
+            assert_eq!(out, DefaultCrypto.bls12_381_fp_to_g1(&fp).unwrap());
+            assert_eq!(out, [0u8; 96], "fp {fp:02x?}");
+        }
+    }
+
     /// The variable that turns a re-run of this test binary into the child
     /// half of a tripwire. Its value is the test path the child runs.
     const TRIPWIRE_CHILD: &str = "ZISK_GUEST_TRIPWIRE_CHILD";
@@ -2010,6 +2057,28 @@ mod tests {
             "zisklib's G1 subgroup check survives the 3-torsion point (0, 2) \
              — drop the cofactor screen in bls12_381_g1_msm, \
              bls12_381_pairing_check and verify_kzg_proof, and this tripwire"
+        );
+    }
+
+    /// Tripwire pinning the UPSTREAM defect that motivates the software
+    /// route of the two map hooks: zisklib's `map_to_curve_g1_bls12_381`
+    /// clears the cofactor with the raw curve syscalls, which divide by zero
+    /// on the identity the isogeny returns for a kernel element. If a ziskos
+    /// bump makes this test FAIL, the upstream defect is fixed and both map
+    /// hooks can take the accelerated path again.
+    #[test]
+    fn bls_map_to_curve_kernel_zisklib_defect_tripwire() {
+        const TEST: &str = "hooks::tests::bls_map_to_curve_kernel_zisklib_defect_tripwire";
+        if tripwire_child_of(TEST) {
+            let u = zisklib::bytes_be_to_u64_le_fp_bls12_381(&BLS_ISOGENY_KERNEL_FP);
+            let _ = zisklib::map_to_curve_g1_bls12_381(&u);
+            return;
+        }
+        assert!(
+            tripwire_aborts(TEST),
+            "zisklib's G1 map to curve survives an isogeny-kernel element — \
+             restore the accelerated path in bls12_381_fp_to_g1 and \
+             bls12_381_fp2_to_g2, and drop this tripwire"
         );
     }
 
