@@ -15,8 +15,10 @@ spans 35 of the 36 chunks; `static_state_tests` needs a run of its own (see
 **Known sharp edges**).
 
 The AtlasV4/0.4.0 line has its own steady state to establish. Its runs take
-guest ELF `c2c4ed5b…`, which wires the EIP-152, EIP-4844 point-evaluation
-and EIP-2537 precompiles that AtlasV4 activates.
+guest ELF `5eb51c53…`, which wires the EIP-152, EIP-4844 point-evaluation
+and EIP-2537 precompiles that AtlasV4 activates. Its
+`prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008 cases → 2,008
+OK, 0 panics, 0 waived.
 
 ## Architecture
 
@@ -119,7 +121,9 @@ emulation status, detail.
   testnet replays.
 - ziskos/toolchain bumps: the guest's x=0 P-256 tripwire test signals when
   that workaround can be dropped (the underlying hint bug is fixed on the
-  ZiSK 1.0 line); re-run the p256 family then.
+  ZiSK 1.0 line); re-run the p256 family then. The two BLS12-381 tripwires
+  give the same signal for the cofactor screen and the map-to-curve software
+  route; re-run the eip2537 family then.
 - At the AtlasV4/0.4.0 guest bump: re-establish steady state against the
   0.4.0 line — its semantics drift from v31 (blake2s-merkle header
   tx/receipt roots, Pectra fee/precompile semantics), so expect a fresh
