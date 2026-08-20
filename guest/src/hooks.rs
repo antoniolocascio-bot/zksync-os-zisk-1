@@ -44,7 +44,6 @@ const BN254_FP_BE: [u8; 32] = [
 /// BLS12-381 base-field modulus p, big-endian:
 /// 4002409555221667393417789825735904156556882819939007885332058136124031650490
 /// 837864442687629129015664037894272559787.
-#[cfg(test)]
 const BLS12_381_FP_BE: [u8; 48] = [
     0x1a, 0x01, 0x11, 0xea, 0x39, 0x7f, 0xe6, 0x9a, 0x4b, 0x1b, 0xa7, 0xb6, 0x43, 0x4b, 0xac, 0xd7,
     0x64, 0x77, 0x4b, 0x84, 0xf3, 0x85, 0x12, 0xbf, 0x67, 0x30, 0xd2, 0xa0, 0xf6, 0xb0, 0xf6, 0x24,
@@ -221,13 +220,25 @@ pub fn blake2b_compress(rounds: u32, h: &mut [u64; 8], m: &[u64; 16], t: &[u64; 
 /// compressed G1 points. Returns true iff the proof holds for the trusted
 /// setup that zisklib embeds (the Ethereum mainnet ceremony's τ·G2, the same
 /// setup the reference's arkworks backend loads).
-#[inline]
+///
+/// EXCEPTION — a commitment or a proof that decodes to a point of cofactor
+/// order (see [`bls12_381_g1_order_divides_cofactor`]): zisklib holds both
+/// points to the subgroup check that divides by zero on such a point. The
+/// caller controls both, and 48 zero bytes with the compression flag decode
+/// straight to the 3-torsion, so the class is one crafted blob call away.
+/// A point of cofactor order lies outside G1, which is the verdict false,
+/// and the reference rejects it as well.
 pub fn verify_kzg_proof(
     z: &[u8; 32],
     y: &[u8; 32],
     commitment: &[u8; 48],
     proof: &[u8; 48],
 ) -> bool {
+    if bls12_381_compressed_g1_order_divides_cofactor(commitment)
+        || bls12_381_compressed_g1_order_divides_cofactor(proof)
+    {
+        return false;
+    }
     zisklib::verify_kzg_proof(z, y, commitment, proof)
 }
 
@@ -268,6 +279,15 @@ pub fn bls12_381_g1_add(a: &[u8; 96], b: &[u8; 96], out: &mut [u8; 96]) -> u8 {
 /// backend, which costs about 160 KiB of guest ROM and no cycles outside the
 /// corner case. Drop this branch when upstream validates the point before it
 /// drops the pair (see the tripwire test below).
+///
+/// EXCEPTION — a call that holds a point of cofactor order (see
+/// [`bls12_381_g1_order_divides_cofactor`]): zisklib's subgroup check divides
+/// by zero on such a point, and the division sits behind a non-unwinding
+/// `extern "C"` shim, so the guest and the prover witness generator both
+/// raise SIGABRT. Route that call to the software reference as well. Every
+/// such point is outside G1, so the call halts either way; the software
+/// route only makes the guest reach that verdict. Drop this branch when
+/// upstream guards the exceptional cases (see the tripwire test below).
 pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(128));
     let mut points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 128);
@@ -283,6 +303,13 @@ pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
         .iter()
         .zip(scalars.iter())
         .any(|(point, scalar)| *point != [0u64; 12] && msm_scalar_is_zero_mod_r(scalar))
+    {
+        return bls12_381_g1_msm_software(pairs, out);
+    }
+
+    if pairs
+        .chunks_exact(128)
+        .any(|pair| bls12_381_g1_order_divides_cofactor(pair[..96].try_into().unwrap()))
     {
         return bls12_381_g1_msm_software(pairs, out);
     }
@@ -321,7 +348,10 @@ pub fn bls12_381_g2_add(a: &[u8; 192], b: &[u8; 192], out: &mut [u8; 192]) -> u8
 ///
 /// `pairs` is `n` × 224 bytes (192-byte point ‖ 32-byte scalar). The software
 /// route is the G2 twin of the one in [`bls12_381_g1_msm`], for the same
-/// upstream drop-before-validation divergence.
+/// upstream drop-before-validation divergence. The twist arithmetic inverts
+/// through zisklib's `inv_fp2_bls12_381`, which maps zero to zero, so an
+/// identity intermediate in the G2 subgroup check divides nothing and needs
+/// no counterpart of the cofactor screen.
 pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(224));
     let mut points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 224);
@@ -358,8 +388,20 @@ pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
 ///
 /// `pairs` is `n` × 288 bytes (96-byte G1 ‖ 192-byte G2). Returns 0 when the
 /// product of pairings is one, 1 when it is not.
+///
+/// EXCEPTION — a call that holds a G1 point of cofactor order (see
+/// [`bls12_381_g1_order_divides_cofactor`]): the G1 subgroup check that
+/// validates every pair divides by zero on such a point, exactly as in
+/// [`bls12_381_g1_msm`], so the call takes the software reference.
 pub fn bls12_381_pairing_check(pairs: &[u8]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(288));
+    if pairs
+        .chunks_exact(288)
+        .any(|pair| bls12_381_g1_order_divides_cofactor(pair[..96].try_into().unwrap()))
+    {
+        return bls12_381_pairing_check_software(pairs);
+    }
+
     let mut g1_points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 288);
     let mut g2_points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 288);
     for pair in pairs.chunks_exact(288) {
@@ -408,6 +450,68 @@ pub fn bls12_381_fp2_to_g2(fp2: &[u8; 96], out: &mut [u8; 192]) -> u8 {
 /// the literal zero.
 fn msm_scalar_is_zero_mod_r(scalar: &[u64; 4]) -> bool {
     zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar))
+}
+
+/// BLS12-381 G1 cofactor h = (x-1)²/3, little-endian 64-bit limbs.
+const BLS12_381_G1_COFACTOR: [u64; 2] = [0x8c00_aaab_0000_aaab, 0x396c_8c00_5555_e156];
+
+/// True when the EIP-2537 G1 point `point` is a curve point whose order
+/// divides the G1 cofactor h — the exact class of G1 inputs that drives
+/// zisklib's subgroup check into a division by zero.
+///
+/// `is_on_subgroup_bls12_381` walks 3·σ(P) through a 126-step ladder of raw
+/// curve syscalls. Those syscalls carry no identity encoding, so the ladder
+/// divides by zero as soon as an intermediate [n]·3σ(P) reaches 𝒪. Every
+/// such intermediate holds |n| < 2¹²⁷, far below the subgroup order r, and
+/// the curve has no point of order two, so the ladder reaches 𝒪 exactly when
+/// the order of P divides h. The identity, a coordinate outside the field
+/// and a point off the curve answer false: zisklib rejects each of them
+/// before the ladder runs.
+fn bls12_381_g1_order_divides_cofactor(point: &[u8; 96]) -> bool {
+    if point.iter().all(|&b| b == 0)
+        || !fp_is_canonical(&point[..48])
+        || !fp_is_canonical(&point[48..])
+    {
+        return false;
+    }
+    let p = zisklib::g1_bytes_be_to_u64_le_bls12_381(point);
+    zisklib::is_on_curve_bls12_381(&p) && bls12_381_g1_cofactor_multiple_is_identity(&p)
+}
+
+/// [h]`p` == 𝒪 for a BLS12-381 curve point `p` other than the identity.
+///
+/// The ladder runs on the accelerated point operations with the identity
+/// cases held outside them: zisklib's `add_bls12_381` covers the equal-x
+/// cases itself, and both operations need a non-identity input.
+fn bls12_381_g1_cofactor_multiple_is_identity(p: &[u64; 12]) -> bool {
+    const IDENTITY: [u64; 12] = [0u64; 12];
+
+    let mut acc = IDENTITY;
+    for bit in (0..126).rev() {
+        if acc != IDENTITY {
+            acc = zisklib::dbl_bls12_381(&acc);
+        }
+        if (BLS12_381_G1_COFACTOR[bit / 64] >> (bit % 64)) & 1 == 1 {
+            acc = if acc == IDENTITY {
+                *p
+            } else {
+                zisklib::add_bls12_381(&acc, p)
+            };
+        }
+    }
+    acc == IDENTITY
+}
+
+/// True when the compressed G1 point `compressed` decodes to a point whose
+/// order divides the G1 cofactor (see
+/// [`bls12_381_g1_order_divides_cofactor`]). The infinity encoding and every
+/// encoding zisklib rejects answer false: neither reaches the subgroup
+/// check.
+fn bls12_381_compressed_g1_order_divides_cofactor(compressed: &[u8; 48]) -> bool {
+    match zisklib::decompress_bls12_381(compressed) {
+        Ok(p) if p != [0u64; 12] => bls12_381_g1_cofactor_multiple_is_identity(&p),
+        _ => false,
+    }
 }
 
 /// [`bls12_381_g1_msm`] through the software reference. The error codes are
@@ -471,6 +575,42 @@ fn bls12_381_g2_msm_software(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
     }
 }
 
+/// [`bls12_381_pairing_check`] through the software reference. The error
+/// codes are the ones the accelerated path returns for the same failure
+/// classes.
+fn bls12_381_pairing_check_software(pairs: &[u8]) -> u8 {
+    use revm::precompile::{
+        bls12_381::{G1Point, G2Point},
+        Crypto, DefaultCrypto, PrecompileHalt,
+    };
+    let collected: Vec<(G1Point, G2Point)> = pairs
+        .chunks_exact(288)
+        .map(|pair| {
+            (
+                (
+                    pair[..48].try_into().unwrap(),
+                    pair[48..96].try_into().unwrap(),
+                ),
+                (
+                    pair[96..144].try_into().unwrap(),
+                    pair[144..192].try_into().unwrap(),
+                    pair[192..240].try_into().unwrap(),
+                    pair[240..].try_into().unwrap(),
+                ),
+            )
+        })
+        .collect();
+    match DefaultCrypto.bls12_381_pairing_check(&collected) {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(PrecompileHalt::Bls12381G1NotOnCurve) => 3,
+        Err(PrecompileHalt::Bls12381G1NotInSubgroup) => 4,
+        Err(PrecompileHalt::Bls12381G2NotOnCurve) => 6,
+        Err(PrecompileHalt::Bls12381G2NotInSubgroup) => 7,
+        Err(_) => 2,
+    }
+}
+
 // ==================== conversion helpers ====================
 
 /// A 32-byte big-endian field element is canonical iff it is < p.
@@ -478,6 +618,13 @@ fn bls12_381_g2_msm_software(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
 fn fq_is_canonical(be: &[u8]) -> bool {
     debug_assert_eq!(be.len(), 32);
     be < &BN254_FP_BE[..]
+}
+
+/// A 48-byte big-endian BLS12-381 field element is canonical iff it is < p.
+#[inline]
+fn fp_is_canonical(be: &[u8]) -> bool {
+    debug_assert_eq!(be.len(), 48);
+    be < &BLS12_381_FP_BE[..]
 }
 
 /// Inverse of zisklib's `g1_bytes_be_to_u64_le_bn254`: [x0..x3, y0..y3]
@@ -1273,6 +1420,32 @@ mod tests {
         assert!(!kzg_both(&z, &y, &commitment, &bad_proof));
     }
 
+    /// A compressed G1 point whose x is zero decodes to the σ-fixed
+    /// 3-torsion, so the compression flag alone puts a point of cofactor
+    /// order in the commitment or the proof field. Both sides reject it.
+    /// These pins abort with the pure zisklib path.
+    #[test]
+    fn kzg_cofactor_order_commitment_and_proof_match_reference() {
+        let mut three_torsion = [0u8; 48];
+        three_torsion[0] = 0x80; // compression flag, x = 0
+        assert!(bls12_381_compressed_g1_order_divides_cofactor(
+            &three_torsion
+        ));
+
+        let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
+        let y = hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");
+        let commitment = hex!(
+            "8f59a8d2a1a625a17f3fea0fe5eb8c896db3764f3185481bc22f91b4aaffcca2"
+            "5f26936857bc3a7c2539ea8ec3a952b7"
+        );
+        let proof = hex!(
+            "a62ad71d14c5719385c0686f1871430475bf3a00f0aa3f7b8dd99a9abc216074"
+            "4faf0070725e00b60ad9a026a15b1a8c"
+        );
+        assert!(!kzg_both(&z, &y, &three_torsion, &proof));
+        assert!(!kzg_both(&z, &y, &commitment, &three_torsion));
+    }
+
     #[test]
     fn kzg_infinity_commitment_cases() {
         // Commitment and proof both the compressed point at infinity: the
@@ -1599,6 +1772,72 @@ mod tests {
         }
     }
 
+    /// G1 points whose order divides the cofactor h: the two σ-fixed
+    /// 3-torsion points (0, ±2), which are the ones the EIP-2537 fixtures
+    /// carry, and an 11-torsion point, which they do not.
+    fn bls_g1_cofactor_order_points() -> [[u8; 96]; 3] {
+        let mut three_torsion = [0u8; 96];
+        three_torsion[95] = 2;
+        let mut three_torsion_neg = three_torsion;
+        three_torsion_neg[48..].copy_from_slice(&fp_neg(three_torsion[48..].try_into().unwrap()));
+        let eleven_torsion = hex!(
+            "19b3e2c8c6bbf59d3c326b531fc1e639d29200c28624ac604f251a12908c9b7f"
+            "735318617f625954cc71cdf03229b1ef"
+            "042fcc94d6c6440d3c0a01177616b72eb6972d90e36e88b5981a05a52ab48ce3"
+            "e22fa88d10f6de85a7d386aad66c0ca8"
+        );
+        [three_torsion, three_torsion_neg, eleven_torsion]
+    }
+
+    /// A curve point outside G1 whose order carries the subgroup order r:
+    /// G1ADD applies no subgroup rule, so it composes one from a G1 point
+    /// and the 3-torsion.
+    fn bls_g1_large_order_off_subgroup() -> [u8; 96] {
+        let mut out = [0u8; 96];
+        let [three_torsion, _, _] = bls_g1_cofactor_order_points();
+        assert_eq!(bls12_381_g1_add(&bls_g1(3), &three_torsion, &mut out), 0);
+        out
+    }
+
+    /// The cofactor screen holds exactly the points that drive zisklib's
+    /// subgroup ladder into the identity, and the screened calls keep the
+    /// reference verdict. These pins fail with the pure zisklib path: it
+    /// aborts on them.
+    #[test]
+    fn bls_g1_cofactor_order_points_match_reference() {
+        for point in bls_g1_cofactor_order_points() {
+            assert!(bls12_381_g1_order_divides_cofactor(&point));
+
+            for s in [scalar(1), scalar(2), scalar(3), [0xff; 32]] {
+                let (ours, reference) = bls_g1_msm_both(&[(point, s)]);
+                assert_eq!(ours, Err(()), "scalar {s:02x?}");
+                assert_eq!(ours, reference);
+            }
+
+            let (ours, reference) = bls_pairing_both(&[(point, bls_g2(1))]);
+            assert_eq!(ours, Err(()));
+            assert_eq!(ours, reference);
+        }
+
+        // Everything else keeps the accelerated path: the identity, points
+        // that fail the field or curve rule, subgroup points, and points off
+        // the subgroup whose order carries r.
+        assert!(!bls12_381_g1_order_divides_cofactor(&[0u8; 96]));
+        let mut non_canonical = bls_g1(3);
+        non_canonical[..48].copy_from_slice(&BLS12_381_FP_BE);
+        assert!(!bls12_381_g1_order_divides_cofactor(&non_canonical));
+        let mut off_curve = bls_g1(3);
+        off_curve[95] ^= 1;
+        assert!(!bls12_381_g1_order_divides_cofactor(&off_curve));
+        assert!(!bls12_381_g1_order_divides_cofactor(&bls_g1(3)));
+
+        let off_subgroup = bls_g1_large_order_off_subgroup();
+        assert!(!bls12_381_g1_order_divides_cofactor(&off_subgroup));
+        let (ours, reference) = bls_g1_msm_both(&[(off_subgroup, scalar(1))]);
+        assert_eq!(ours, Err(()));
+        assert_eq!(ours, reference);
+    }
+
     #[test]
     fn bls_g2_msm_matches_reference() {
         let p = bls_g2(3);
@@ -1712,6 +1951,66 @@ mod tests {
         assert!(DefaultCrypto
             .bls12_381_fp2_to_g2(([0u8; 48], BLS12_381_FP_BE))
             .is_err());
+    }
+
+    /// The variable that turns a re-run of this test binary into the child
+    /// half of a tripwire. Its value is the test path the child runs.
+    const TRIPWIRE_CHILD: &str = "ZISK_GUEST_TRIPWIRE_CHILD";
+    /// The line the child prints before it makes the defective call.
+    const TRIPWIRE_REACHED: &str = "tripwire child reached the defective call";
+
+    /// True when this process is the child half of `test`. The child then
+    /// makes the defective call itself.
+    fn tripwire_child_of(test: &str) -> bool {
+        if std::env::var(TRIPWIRE_CHILD).as_deref() != Ok(test) {
+            return false;
+        }
+        println!("{TRIPWIRE_REACHED}");
+        true
+    }
+
+    /// True when `test` dies on SIGABRT in a child process.
+    ///
+    /// The defective zisklib calls divide by zero inside an `extern "C"`
+    /// shim, which is not allowed to unwind: the panic aborts the process,
+    /// where neither `#[should_panic]` nor `catch_unwind` can see it. The
+    /// child half is this same binary, re-run with the marker variable set.
+    fn tripwire_aborts(test: &str) -> bool {
+        use std::os::unix::process::ExitStatusExt;
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(TRIPWIRE_CHILD, test)
+            .output()
+            .expect("re-run of the test binary");
+        assert!(
+            String::from_utf8_lossy(&child.stdout).contains(TRIPWIRE_REACHED),
+            "the child ran no body for {test}: the test path recorded in the \
+             tripwire has drifted from the test name"
+        );
+        child.status.signal() == Some(6)
+    }
+
+    /// Tripwire pinning the UPSTREAM defect that motivates the cofactor
+    /// screen: zisklib's `is_on_subgroup_bls12_381` drives its ladder
+    /// through the identity for a point whose order divides the cofactor,
+    /// and the raw curve syscall divides by zero there. If a ziskos bump
+    /// makes this test FAIL, the upstream defect is fixed and the screen
+    /// (and this tripwire) can be dropped.
+    #[test]
+    fn bls_g1_subgroup_cofactor_order_zisklib_defect_tripwire() {
+        const TEST: &str = "hooks::tests::bls_g1_subgroup_cofactor_order_zisklib_defect_tripwire";
+        if tripwire_child_of(TEST) {
+            let [three_torsion, _, _] = bls_g1_cofactor_order_points();
+            let point = zisklib::g1_bytes_be_to_u64_le_bls12_381(&three_torsion);
+            let _ = zisklib::is_on_subgroup_bls12_381(&point);
+            return;
+        }
+        assert!(
+            tripwire_aborts(TEST),
+            "zisklib's G1 subgroup check survives the 3-torsion point (0, 2) \
+             — drop the cofactor screen in bls12_381_g1_msm, \
+             bls12_381_pairing_check and verify_kzg_proof, and this tripwire"
+        );
     }
 
     #[test]
