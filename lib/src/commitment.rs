@@ -217,26 +217,51 @@ pub fn da_commitment_blobs(versioned_hashes: &[B256]) -> B256 {
     keccak256(&data)
 }
 
-/// Full batch public input hash, matching zksync-os draft-0.4.0
+/// Full batch public input hash, matching zksync-os v0.3.2
 /// `BatchPublicInput::hash` (basic_bootloader .../zk/post_tx_op/public_input.rs):
-/// Keccak256(state_before || state_after || chain_config_hash || batch_output_hash)
+/// Keccak256(state_before || state_after || batch_output_hash)
+///
+/// The three-word form is the one L1 gates against: `Executor`'s
+/// `_getBatchProofPublicInputZKsyncOS` hashes the two state commitments and the
+/// batch commitment. A fourth `chain_config_hash` word belongs to the 0.4.0
+/// line, which this guest does not reach — it resolves AtlasV1 through AtlasV3
+/// alone. Committing that word here gives a public input the first prover never
+/// computes, so L1 cannot gate the two proof lanes against each other.
 pub fn batch_public_input_hash(
     state_before: &B256,
     state_after: &B256,
-    chain_config_hash: &B256,
     batch_output_hash: &B256,
 ) -> B256 {
-    let mut data = [0u8; 128];
+    let mut data = [0u8; 96];
     data[..32].copy_from_slice(state_before.as_slice());
     data[32..64].copy_from_slice(state_after.as_slice());
-    data[64..96].copy_from_slice(chain_config_hash.as_slice());
-    data[96..128].copy_from_slice(batch_output_hash.as_slice());
+    data[64..96].copy_from_slice(batch_output_hash.as_slice());
     keccak256(&data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The batch public input holds three words, which is what
+    /// `Executor._getBatchProofPublicInputZKsyncOS` hashes on the settlement
+    /// layer and what zksync-os v0.3.2 `BatchPublicInput::hash` computes. A
+    /// fourth `chain_config_hash` word arrives with the 0.4.0 line. The
+    /// expected value comes from `cast keccak` over the concatenation, so the
+    /// oracle is independent of this crate.
+    #[test]
+    fn batch_public_input_holds_three_words() {
+        let state_before = B256::repeat_byte(0x11);
+        let state_after = B256::repeat_byte(0x22);
+        let batch_output = B256::repeat_byte(0x33);
+        let expected: B256 = "0x41524791bda53e6da2158f10c15e3672835515d6135111d11c7e9880cfcbe573"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            batch_public_input_hash(&state_before, &state_after, &batch_output),
+            expected,
+        );
+    }
 
     #[test]
     fn priority_ops_hash_empty() {
