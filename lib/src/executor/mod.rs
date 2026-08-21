@@ -322,18 +322,8 @@ fn run_execution_and_commit(
         derived_sl_chain_id,
     );
 
-    // Top-level PI commits to the chain config (draft-0.4.0 `BatchPublicInput::hash`).
-    let chain_config_hash = commitment::chain_config_hash(
-        input.chain_id,
-        meta.fri_proof_verification_enabled,
-        meta.max_tx_gas_limit,
-    );
-    let commitment = commitment::batch_public_input_hash(
-        &state_before,
-        &state_after,
-        &chain_config_hash,
-        &batch_hash,
-    );
+    let commitment =
+        commitment::batch_public_input_hash(&state_before, &state_after, &batch_hash);
     (output, commitment, state_before, state_after, batch_hash)
 }
 

@@ -1186,7 +1186,7 @@ mod tests {
             0,
         );
         let ccfg = commitment::chain_config_hash(37, false, 1 << 24);
-        let pi = commitment::batch_public_input_hash(&sb, &sa, &ccfg, &bo);
+        let pi = commitment::batch_public_input_hash(&sb, &sa, &bo);
 
         let zero = "00".repeat(32);
         let guards = format!(
