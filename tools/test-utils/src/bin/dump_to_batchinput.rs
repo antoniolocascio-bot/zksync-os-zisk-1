@@ -1,4 +1,4 @@
-//! Build a wire-v2 `BatchInput` from a prover-neutral zksync-os test-rig
+//! Build a current-wire `BatchInput` from a prover-neutral zksync-os test-rig
 //! state dump (JSON), so EVM test-corpus batches can be executed by the
 //! ZiSK REVM guest.
 //!

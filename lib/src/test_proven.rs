@@ -2907,6 +2907,95 @@ mod tests {
         );
     }
 
+    fn decode_hex_fixture(source: &str) -> Vec<u8> {
+        let digits: Vec<u8> = source.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        assert_eq!(digits.len() % 2, 0, "hex fixture has an odd digit count");
+        digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let pair = core::str::from_utf8(pair).unwrap();
+                u8::from_str_radix(pair, 16).unwrap()
+            })
+            .collect()
+    }
+
+    fn assert_released_wire_v3_fixture(
+        source: &str,
+        expected_spec_id: u8,
+        expected_minor: u32,
+        expected_commitment: &str,
+    ) -> BatchInput {
+        let framed = decode_hex_fixture(source);
+        let len = u64::from_le_bytes(framed[..8].try_into().unwrap()) as usize;
+        let wire_bytes = &framed[8..8 + len];
+
+        assert_eq!(crate::wire::batch_input_version(wire_bytes).unwrap(), 3);
+        let legacy: crate::wire::v3::BatchInput = crate::wire::decode(wire_bytes).unwrap();
+        assert_eq!(
+            crate::wire::encode(&legacy).unwrap(),
+            wire_bytes,
+            "the frozen v3 schema must reproduce the historical bytes"
+        );
+
+        let normalized = crate::wire::decode_batch_input(wire_bytes).unwrap();
+        assert_eq!(normalized.version, 3);
+        assert_eq!(normalized.spec_id, expected_spec_id);
+        assert_eq!(normalized.protocol_version_minor, expected_minor);
+        assert_eq!(
+            normalized.batch_meta.pubdata_content,
+            crate::types::PUBDATA_CONTENT_FULL
+        );
+
+        let (out_collecting, commitment_collecting) =
+            executor::execute_and_commit_from_bincode(wire_bytes).unwrap();
+        let (out_streaming, commitment_streaming) =
+            executor::execute_and_commit_streaming(wire_bytes).unwrap();
+        let expected: B256 = expected_commitment.parse().unwrap();
+        assert_eq!(commitment_collecting, expected);
+        assert_eq!(commitment_streaming, expected);
+        assert_eq!(
+            crate::wire::encode(&out_collecting).unwrap(),
+            crate::wire::encode(&out_streaming).unwrap()
+        );
+        normalized
+    }
+
+    /// A wire-v3 input generated and executed at PR #18 commit 25085ac, before
+    /// the v5 upgrade existed. The new guest must parse the exact historical
+    /// bytes through both paths and preserve the old-spec commitment; this
+    /// proves that v3 is dispatched by its own schema and semantics rather than
+    /// being positionally interpreted as v5.
+    #[test]
+    fn released_wire_v3_fixture_keeps_its_commitment() {
+        assert_released_wire_v3_fixture(
+            include_str!("../testdata/wire-v3-session-batch-1.hex"),
+            1,
+            30,
+            "0x0b34f54c4edd64be7d7b6bcfa09edddc22a7b87e14a253191e8fd521f087914a",
+        );
+    }
+
+    /// A second pre-upgrade fixture selects AtlasV3 and exercises an actual L2
+    /// transaction, authenticated interop slot proofs, and a tree update. This
+    /// pins the latest execution tier wire v3 could select, not only its schema.
+    #[test]
+    fn released_wire_v3_atlas_v3_vm_keeps_its_commitment() {
+        let normalized = assert_released_wire_v3_fixture(
+            include_str!("../testdata/wire-v3-atlas-v3.hex"),
+            2,
+            31,
+            "0x4e101c4291eebeb63b52cd9be88da5a9ab03307500663aab4805aad5da7e4cca",
+        );
+        assert!(normalized.batch_meta.interop_proofs.is_some());
+        assert!(normalized
+            .batch_meta
+            .interop_proofs
+            .as_ref()
+            .unwrap()
+            .commitment_tree
+            .is_none());
+    }
+
     /// Read-spam batch: N distinct cold storage slots (each with a valid
     /// depth-64 Existing proof) plus the sender account, driven by a single
     /// `force_fail` L1 tx so execution is trivial and the witness (all the

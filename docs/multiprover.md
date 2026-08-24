@@ -203,6 +203,16 @@ key covers every range width.
 
 ## Wire formats
 
+The server writes the current `BatchInput` wire v5. The guest reads the
+leading version before the positional bincode payload and supports both the
+released v3 schema and current v5 simultaneously; each is normalized into one
+in-memory representation while preserving its `spec_id` and protocol minor.
+Wire v3 can select AtlasV1 through AtlasV3, while wire v5 also carries the
+AtlasV4-only chain-config mode and interop commitment-tree proofs. Wire v4 was
+never released from `main` and is rejected. Supporting old input bytes does not
+preserve the old programVK: any guest code change still produces a new ELF and
+therefore rotates the key.
+
 | Artifact | Size | Layout |
 |---|---|---|
 | Per-batch `vadcop_final` stream | 336168 B | `[minimal=0][n_publics=68][programVK(4)][publics(64)][body][vadcopVK(4)]`, u64 little-endian words |

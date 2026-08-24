@@ -72,15 +72,23 @@ fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B25
     run_execution_and_commit(input, spec_id, proven_db)
 }
 
-/// Assert the wire-format version, resolve the spec id, and validate the block
-/// sequence. Shared by the collecting and streaming entry points.
+/// Assert the normalized wire-format version, resolve the spec id, and validate
+/// the block sequence. Shared by the collecting and streaming entry points.
 fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
-    assert_eq!(
+    assert!(
+        crate::wire::SUPPORTED_BATCH_INPUT_VERSIONS.contains(&input.version),
+        "unsupported BatchInput wire-format version {} (supported: {})",
         input.version,
-        crate::types::BATCH_INPUT_VERSION,
-        "unsupported BatchInput wire-format version {} (this guest understands {})",
-        input.version,
-        crate::types::BATCH_INPUT_VERSION,
+        crate::wire::SUPPORTED_BATCH_INPUT_VERSIONS
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    assert!(
+        input.version != crate::wire::v3::BATCH_INPUT_VERSION || input.spec_id <= 2,
+        "BatchInput wire v3 cannot carry spec_id {} (maximum is AtlasV3/spec_id 2)",
+        input.spec_id,
     );
     let spec_id = match input.spec_id {
         0 => ZkSpecId::AtlasV1,
@@ -710,8 +718,7 @@ pub(crate) fn reconstruct_block_hashes_blake_after(
 pub fn execute_and_commit_from_bincode(
     bincode_data: &[u8],
 ) -> Result<(BatchOutput, B256), String> {
-    let batch_input: BatchInput =
-        crate::wire::decode(bincode_data).map_err(|e| format!("deserialize: {e}"))?;
+    let batch_input = crate::wire::decode_batch_input(bincode_data)?;
     Ok(execute_and_commit(&batch_input))
 }
 
@@ -853,6 +860,32 @@ mod tests {
         }
     }
 
+    /// Released wire-v3 inputs keep their original spec dispatch after schema
+    /// normalization. They are not promoted to AtlasV4 merely because the
+    /// executing guest also understands wire v5.
+    #[test]
+    fn released_wire_v3_resolves_its_original_specs() {
+        for (spec_id, minor, expected) in [
+            (0u8, 30u32, ZkSpecId::AtlasV1),
+            (1, 30, ZkSpecId::AtlasV2),
+            (2, 31, ZkSpecId::AtlasV3),
+        ] {
+            let mut input = dispatch_batch(spec_id, minor);
+            input.version = crate::wire::v3::BATCH_INPUT_VERSION;
+            assert_eq!(resolve_spec_and_validate(&input), expected);
+        }
+    }
+
+    /// AtlasV4 was introduced after wire v3. Keeping this matrix explicit
+    /// prevents a forged legacy version from selecting new-spec semantics.
+    #[test]
+    #[should_panic(expected = "BatchInput wire v3 cannot carry spec_id 3")]
+    fn wire_v3_cannot_select_atlas_v4() {
+        let mut input = dispatch_batch(3, 32);
+        input.version = crate::wire::v3::BATCH_INPUT_VERSION;
+        resolve_spec_and_validate(&input);
+    }
+
     /// A spec byte no release emits is rejected rather than mapped to a
     /// neighbour.
     #[test]
@@ -886,9 +919,8 @@ mod tests {
         resolve_spec_and_validate(&dispatch_batch(1, 31));
     }
 
-    /// The wire-format version the previous guest understood is rejected with
-    /// the named error, so a server that predates the ZKsync OS 0.5.0 input
-    /// contract cannot feed this guest.
+    /// Wire v4 was an internal development format and is deliberately rejected
+    /// rather than accidentally creating a compatibility obligation for it.
     #[test]
     #[should_panic(expected = "unsupported BatchInput wire-format version 4")]
     fn rejects_the_previous_wire_format_version() {

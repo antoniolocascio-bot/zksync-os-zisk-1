@@ -3,7 +3,7 @@
 #
 # Drives ethereum/execution-spec-tests fixtures through zksync-os's
 # evm_tester with the rig state-dump hook enabled, converts every dumped
-# block into a wire-v2 BatchInput, and executes each one in ziskemu with
+# block into a current-wire BatchInput, and executes each one in ziskemu with
 # the pinned ZiSK guest ELF. A guest panic (e.g. an unwired precompile
 # crypto hook) is reported per chunk; native-validation failures from the
 # reader are reported separately (corpus/reader issues, not guest issues).

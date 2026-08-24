@@ -32,13 +32,14 @@ use serde::{Deserialize, Serialize};
 /// `[len: u64 LE][bincode][zero pad to 8]`. Every field is required; there
 /// are no optional-at-the-wire fields.
 ///
-/// Compatibility rule: the server (input builder), the guest ELF, and the
-/// prover service must be built from the same revision of this crate. Any
-/// change to the layout of `BatchInput` or anything it transitively contains
-/// bumps this constant in the same commit; the executor rejects versions it
-/// does not understand before touching the rest of the payload, so a skew
-/// fails with a named error instead of a positional misparse. A version bump
-/// implies a guest rebuild and therefore a VK rotation.
+/// Compatibility rule: writers emit this current version. Readers dispatch on
+/// the leading version and may also accept frozen released schemas (currently
+/// wire v3; see [`crate::wire::v3`]), normalizing them into this in-memory
+/// representation. Any change to the current layout of `BatchInput` or
+/// anything it transitively contains bumps this constant in the same commit.
+/// Unsupported versions fail before the rest of the positional payload is
+/// parsed. A version bump still implies a guest rebuild and therefore a VK
+/// rotation, independently of input compatibility.
 pub const BATCH_INPUT_VERSION: u32 = 5;
 
 use crate::merkle::{BatchTreeUpdate, StorageProof};
@@ -114,9 +115,9 @@ pub const PUBDATA_CONTENT_LOGS_ONLY: u8 = 1;
 /// Complete batch input for the ZiSK guest.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BatchInput {
-    /// Wire-format version. Bump on any layout change; the executor rejects
-    /// versions it does not understand. Leading field so future decoders can
-    /// read it before the rest of the payload.
+    /// Source wire-format version. The versioned decoder preserves this after
+    /// normalizing historical layouts. Leading field so the decoder can choose
+    /// a schema before parsing the rest of the payload.
     pub version: u32,
     pub chain_id: u64,
     /// ZKsync OS state transition function tier: AtlasV1 = 0, AtlasV2 = 1,
@@ -328,4 +329,3 @@ pub struct TxOutput {
     pub gas_used: u64,
     pub output: Vec<u8>,
 }
-

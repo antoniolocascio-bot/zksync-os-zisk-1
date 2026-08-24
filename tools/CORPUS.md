@@ -1,7 +1,7 @@
 # EVM-corpus native and target lanes
 
 Runs the ethereum/execution-spec-tests corpus through production-semantics
-zksync-os, converts every executed block into a wire-v2 `BatchInput`, checks
+zksync-os, converts every executed block into a current-wire `BatchInput`, checks
 the ZiSK/REVM guest against native ground truth on six axes (header hash,
 tree root, state commitments, per-account after-images), and executes each
 case in `ziskemu` with the pinned guest ELF.

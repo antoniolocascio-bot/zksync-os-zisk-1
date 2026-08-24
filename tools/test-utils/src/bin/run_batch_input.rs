@@ -6,7 +6,6 @@
 //! Usage: cargo run --bin run_batch_input -- <batch_input.bin>
 
 use zksync_os_zisk_lib::executor;
-use zksync_os_zisk_lib::types::BatchInput;
 use zksync_os_zisk_lib::wire;
 
 fn main() {
@@ -14,7 +13,7 @@ fn main() {
         .nth(1)
         .expect("usage: run_batch_input <batch_input.bin>");
     let bytes = std::fs::read(&path).expect("read input file");
-    let input: BatchInput = wire::decode(&bytes).expect("decode BatchInput");
+    let input = wire::decode_batch_input(&bytes).expect("decode BatchInput");
 
     println!(
         "wire_version={} spec_id={} protocol_minor={} chain_id={} blocks={}..={} txs={}",

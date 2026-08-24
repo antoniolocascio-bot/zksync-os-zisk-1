@@ -16,21 +16,21 @@
 //! depth.
 //!
 //! Everything else (`version`, scalars, `transactions`, `account_preimages`,
-//! `block_hashes`, `batch_meta`, `bytecodes`) deserializes through the normal
-//! derived `Deserialize` impls — those are not the dominant memory term. The
-//! reconstructed `BatchInput` carries EMPTY `storage_proofs` vectors (they are
-//! consumed only here and never read during execution/commitment), and the
-//! `ProvenDB` is assembled with the exact same helpers the collecting path
-//! (`proven_db::build_proven_db`) uses, so both paths are byte-identical.
+//! `block_hashes`, `batch_meta`, `bytecodes`) deserializes through the derived
+//! type for the selected wire version — those are not the dominant memory
+//! term. The reconstructed current `BatchInput` carries EMPTY
+//! `storage_proofs` vectors (they are consumed only here and never read during
+//! execution/commitment), and the `ProvenDB` is assembled with the exact same
+//! helpers the collecting path (`proven_db::build_proven_db`) uses, so both
+//! paths are byte-identical.
 //!
 //! WIRE FORMAT: the server serializes `BatchInput` with bincode 2.x through its
 //! serde path and the standard configuration (see `crate::wire`). This module
 //! parses the same bytes, but drives that same configuration through bincode
 //! 2's `OwnedSerdeDecoder`, so the collecting path and the streaming path stay
 //! byte-identical. Only the guest's parsing differs. The field order below MUST
-//! match the `#[derive(Deserialize)]` field order of `BatchInput`/`BlockInput`
-//! in `types.rs`; the `streaming_provendb_matches_collecting` regression test
-//! guards against drift.
+//! match both current `types.rs` and every supported frozen schema in `wire/`;
+//! the historical fixtures and streaming regression tests guard against drift.
 
 use std::collections::HashMap;
 
@@ -102,6 +102,7 @@ macro_rules! field {
 
 struct BatchInputSeed<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> DeserializeSeed<'de> for BatchInputSeed<'a> {
@@ -110,13 +111,17 @@ impl<'de, 'a> DeserializeSeed<'de> for BatchInputSeed<'a> {
         d.deserialize_struct(
             "BatchInput",
             BATCH_INPUT_FIELDS,
-            BatchInputVisitor { state: self.state },
+            BatchInputVisitor {
+                state: self.state,
+                wire_version: self.wire_version,
+            },
         )
     }
 }
 
 struct BatchInputVisitor<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> Visitor<'de> for BatchInputVisitor<'a> {
@@ -132,10 +137,31 @@ impl<'de, 'a> Visitor<'de> for BatchInputVisitor<'a> {
         let spec_id: u8 = field!(seq, 2);
         let protocol_version_minor: u32 = field!(seq, 3);
         let blocks = seq
-            .next_element_seed(BlocksSeed { state: self.state })?
+            .next_element_seed(BlocksSeed {
+                state: self.state,
+                wire_version: self.wire_version,
+            })?
             .ok_or_else(|| de::Error::invalid_length(4, &"blocks field"))?;
-        let batch_meta: BatchMeta = field!(seq, 5);
+        let batch_meta: BatchMeta = match self.wire_version {
+            crate::wire::v3::BATCH_INPUT_VERSION => {
+                let legacy: crate::wire::v3::BatchMeta = field!(seq, 5);
+                legacy.into()
+            }
+            BATCH_INPUT_VERSION => field!(seq, 5),
+            other => {
+                return Err(de::Error::custom(format_args!(
+                    "unsupported BatchInput wire-format version {other}"
+                )))
+            }
+        };
         let bytecodes: Vec<(B256, Vec<u8>)> = field!(seq, 6);
+
+        if version != self.wire_version {
+            return Err(de::Error::custom(format_args!(
+                "BatchInput version changed while decoding: probed {}, decoded {version}",
+                self.wire_version
+            )));
+        }
 
         Ok(BatchInput {
             version,
@@ -153,17 +179,22 @@ impl<'de, 'a> Visitor<'de> for BatchInputVisitor<'a> {
 
 struct BlocksSeed<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> DeserializeSeed<'de> for BlocksSeed<'a> {
     type Value = Vec<BlockInput>;
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Vec<BlockInput>, D::Error> {
-        d.deserialize_seq(BlocksVisitor { state: self.state })
+        d.deserialize_seq(BlocksVisitor {
+            state: self.state,
+            wire_version: self.wire_version,
+        })
     }
 }
 
 struct BlocksVisitor<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> Visitor<'de> for BlocksVisitor<'a> {
@@ -181,6 +212,7 @@ impl<'de, 'a> Visitor<'de> for BlocksVisitor<'a> {
         let mut blocks = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_BLOCK_PREALLOC));
         while let Some(block) = seq.next_element_seed(BlockSeed {
             state: &mut *self.state,
+            wire_version: self.wire_version,
         })? {
             blocks.push(block);
         }
@@ -192,6 +224,7 @@ impl<'de, 'a> Visitor<'de> for BlocksVisitor<'a> {
 
 struct BlockSeed<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> DeserializeSeed<'de> for BlockSeed<'a> {
@@ -200,13 +233,17 @@ impl<'de, 'a> DeserializeSeed<'de> for BlockSeed<'a> {
         d.deserialize_struct(
             "BlockInput",
             BLOCK_INPUT_FIELDS,
-            BlockVisitor { state: self.state },
+            BlockVisitor {
+                state: self.state,
+                wire_version: self.wire_version,
+            },
         )
     }
 }
 
 struct BlockVisitor<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> Visitor<'de> for BlockVisitor<'a> {
@@ -226,16 +263,39 @@ impl<'de, 'a> Visitor<'de> for BlockVisitor<'a> {
         let gas_limit: u64 = field!(seq, 3);
         let coinbase: Address = field!(seq, 4);
         let prev_randao: B256 = field!(seq, 5);
-        let transactions: Vec<TxInput> = field!(seq, 6);
+        let transactions: Vec<TxInput> = match self.wire_version {
+            crate::wire::v3::BATCH_INPUT_VERSION => {
+                let legacy: Vec<crate::wire::v3::TxInput> = field!(seq, 6);
+                legacy.into_iter().map(Into::into).collect()
+            }
+            BATCH_INPUT_VERSION => field!(seq, 6),
+            other => {
+                return Err(de::Error::custom(format_args!(
+                    "unsupported BatchInput wire-format version {other}"
+                )))
+            }
+        };
         let account_preimages: Vec<(Address, Vec<u8>)> = field!(seq, 7);
         let block_hashes: Vec<(u64, B256)> = field!(seq, 8);
         // Stream storage_proofs — verify & drop each; collect nothing.
         seq.next_element_seed(StorageProofsSeed {
             state: &mut *self.state,
+            wire_version: self.wire_version,
         })?
         .ok_or_else(|| de::Error::invalid_length(9, &"storage_proofs field"))?;
         let block_header_hash: B256 = field!(seq, 10);
-        let l2_to_l1_logs: Vec<L2ToL1LogEntry> = field!(seq, 11);
+        let l2_to_l1_logs: Vec<L2ToL1LogEntry> = match self.wire_version {
+            crate::wire::v3::BATCH_INPUT_VERSION => {
+                let legacy: Vec<crate::wire::v3::L2ToL1LogEntry> = field!(seq, 11);
+                legacy.into_iter().map(Into::into).collect()
+            }
+            BATCH_INPUT_VERSION => field!(seq, 11),
+            other => {
+                return Err(de::Error::custom(format_args!(
+                    "unsupported BatchInput wire-format version {other}"
+                )))
+            }
+        };
         let expected_tree_root: B256 = field!(seq, 12);
 
         // Record this block's recovered root for the deferred equality check
@@ -267,17 +327,22 @@ impl<'de, 'a> Visitor<'de> for BlockVisitor<'a> {
 
 struct StorageProofsSeed<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> DeserializeSeed<'de> for StorageProofsSeed<'a> {
     type Value = ();
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
-        d.deserialize_seq(StorageProofsVisitor { state: self.state })
+        d.deserialize_seq(StorageProofsVisitor {
+            state: self.state,
+            wire_version: self.wire_version,
+        })
     }
 }
 
 struct StorageProofsVisitor<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> Visitor<'de> for StorageProofsVisitor<'a> {
@@ -293,6 +358,7 @@ impl<'de, 'a> Visitor<'de> for StorageProofsVisitor<'a> {
         while seq
             .next_element_seed(OneProofSeed {
                 state: &mut *self.state,
+                wire_version: self.wire_version,
             })?
             .is_some()
         {}
@@ -302,6 +368,7 @@ impl<'de, 'a> Visitor<'de> for StorageProofsVisitor<'a> {
 
 struct OneProofSeed<'a> {
     state: &'a mut StreamState,
+    wire_version: u32,
 }
 
 impl<'de, 'a> DeserializeSeed<'de> for OneProofSeed<'a> {
@@ -309,7 +376,19 @@ impl<'de, 'a> DeserializeSeed<'de> for OneProofSeed<'a> {
     fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
         // Deserialize exactly one (flat_key, StorageProof) via the derived
         // impls (this allocates the proof's siblings)...
-        let (key, proof) = <(B256, StorageProof)>::deserialize(d)?;
+        let (key, proof): (B256, StorageProof) = match self.wire_version {
+            crate::wire::v3::BATCH_INPUT_VERSION => {
+                let (key, legacy) =
+                    <(B256, crate::wire::v3::StorageProof)>::deserialize(d)?;
+                (key, legacy.into())
+            }
+            BATCH_INPUT_VERSION => <(B256, StorageProof)>::deserialize(d)?,
+            other => {
+                return Err(de::Error::custom(format_args!(
+                    "unsupported BatchInput wire-format version {other}"
+                )))
+            }
+        };
         // ...verify it and extract only the small value...
         let (root, value) = proven_db::verify_storage_proof(&key, &proof);
         // ...cross-check intra-block root consistency (the collecting path
@@ -342,6 +421,19 @@ pub(super) fn stream_deserialize_and_build_db(
     // bincode 2.x, standard config (little-endian, variable-length integers).
     // `decode_from_slice` reports the bytes read and ignores the rest, so the
     // guest input's zero pad to an 8-byte boundary is harmless here too.
+    let wire_version = crate::wire::batch_input_version(bytes)
+        .map_err(|e| format!("read BatchInput version: {e}"))?;
+    if !crate::wire::SUPPORTED_BATCH_INPUT_VERSIONS.contains(&wire_version) {
+        return Err(format!(
+            "unsupported BatchInput wire-format version {wire_version} (supported: {})",
+            crate::wire::SUPPORTED_BATCH_INPUT_VERSIONS
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     let mut state = StreamState {
         verified_storage: HashMap::new(),
         current_block_recovered_root: None,
@@ -349,7 +441,10 @@ pub(super) fn stream_deserialize_and_build_db(
     };
 
     let mut decoder = OwnedSerdeDecoder::from_reader(SliceReader::new(bytes), crate::wire::config());
-    let input: BatchInput = BatchInputSeed { state: &mut state }
+    let input: BatchInput = BatchInputSeed {
+        state: &mut state,
+        wire_version,
+    }
         .deserialize(decoder.as_deserializer())
         .map_err(|e| format!("streaming deserialize: {e}"))?;
 
