@@ -1,0 +1,6 @@
+diff --git a/tests/evm_tester/Cargo.toml b/tests/evm_tester/Cargo.toml
+--- a/tests/evm_tester/Cargo.toml
++++ b/tests/evm_tester/Cargo.toml
+@@ -40 +40 @@
+-zksync_os_rig = { package = "rig", path = "../../tests/rig", features = ["evm_tester"] }
++zksync_os_rig = { package = "rig", path = "../../tests/rig", features = ["production"] }
