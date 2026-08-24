@@ -1,6 +1,6 @@
 name: Release assets
 
-# Uploads the guest ELFs tarball, the host tools tarball, and one SHA256SUMS to every published release (prereleases included).
+# Uploads the guest ELFs, verification keys, host tools, and one SHA256SUMS to every published release (prereleases included).
 
 on:
   release:
@@ -20,6 +20,7 @@ permissions:
 env:
   TAG: ${{ inputs.tag || github.event.release.tag_name }}
   TARGET: x86_64-unknown-linux-gnu
+  ZISK_VERSION: "0.18.0"
 
 defaults:
   run:
@@ -86,9 +87,111 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  verification-keys:
+    name: ZiSK verification keys (derived and pin-verified)
+    needs: guest-elfs
+    runs-on: matterlabs-ci-runner-high-performance
+    timeout-minutes: 180
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - name: Download hash-verified guest ELFs
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: zksync-os-zisk-guest-elfs-${{ env.TAG }}.tar.gz
+          path: guest-artifact
+
+      # Recheck the producer job's outputs against the reviewed pins before deriving from them.
+      - name: Extract and verify both guest ELFs
+        run: |
+          mkdir out
+          tar -xzf "guest-artifact/zksync-os-zisk-guest-elfs-${TAG}.tar.gz" -C out
+          test "$(sha256sum out/zksync-os-zisk-guest | cut -d' ' -f1)" = \
+            "$(tr -d '[:space:]' < guest/GUEST_ELF_SHA256)"
+          test "$(sha256sum out/zksync-os-zisk-guest-aggregator | cut -d' ' -f1)" = \
+            "$(tr -d '[:space:]' < guest-aggregator/GUEST_ELF_SHA256)"
+
+      - name: Install ZiSK system dependencies
+        run: |
+          SUDO=""
+          [[ "$(id -u)" -eq 0 ]] || SUDO="sudo"
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xz-utils jq curl build-essential qemu-system libomp-dev libgmp-dev \
+            nlohmann-json3-dev protobuf-compiler uuid-dev libgrpc++-dev \
+            libsecp256k1-dev libsodium-dev libpqxx-dev nasm libopenmpi-dev \
+            openmpi-bin openmpi-common libclang-dev clang gcc-riscv64-unknown-elf
+
+      - name: Install rustup
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # CPU program setup derives ROM verification data from the STARK proving key.
+      - name: Install ZiSK and the STARK proving key
+        run: |
+          curl -sSfL \
+            "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/install.sh" \
+            -o /tmp/ziskup-install.sh
+          bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --cpu -y
+          echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+
+      - name: Derive both program VKs
+        run: |
+          .github/scripts/derive-vk.sh out/zksync-os-zisk-guest-aggregator /tmp/vk-aggregator
+          .github/scripts/derive-vk.sh out/zksync-os-zisk-guest /tmp/vk-inner
+
+      - name: Pack verification-key tarball
+        run: |
+          vadcop_verkey="$HOME/.zisk/provingKey/zisk/vadcop_final/vadcop_final.verkey.bin"
+          test -f "$vadcop_verkey"
+          .github/scripts/build-release-assets.py \
+            --tag "$TAG" \
+            --commit "$(git rev-parse HEAD)" \
+            --zisk-version "$ZISK_VERSION" \
+            --inner-elf out/zksync-os-zisk-guest \
+            --inner-verkey /tmp/vk-inner/program.verkey.bin \
+            --inner-record guest/GUEST_PROGRAM_VK \
+            --aggregator-elf out/zksync-os-zisk-guest-aggregator \
+            --aggregator-verkey /tmp/vk-aggregator/program.verkey.bin \
+            --aggregator-record guest-aggregator/GUEST_PROGRAM_VK \
+            --vadcop-verkey "$vadcop_verkey" \
+            --output verification-keys \
+            --summary "$GITHUB_STEP_SUMMARY"
+          tar -czf "zksync-os-zisk-verification-keys-${TAG}.tar.gz" \
+            -C verification-keys \
+            zksync-os-zisk-guest.verkey.bin \
+            zksync-os-zisk-guest-aggregator.verkey.bin \
+            zisk-vadcop-final.verkey.bin \
+            zisk-release.json
+
+      - name: Keep the derivation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-derivation-${{ env.TAG }}
+          path: |
+            /tmp/vk-inner/program-setup.log
+            /tmp/vk-aggregator/program-setup.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zksync-os-zisk-verification-keys-${{ env.TAG }}.tar.gz
+          path: zksync-os-zisk-verification-keys-${{ env.TAG }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Checksum and upload to the release
-    needs: [guest-elfs, host-tools]
+    needs: [guest-elfs, host-tools, verification-keys]
     runs-on: ubuntu-latest
     steps:
       - name: Download tarballs
@@ -127,6 +230,7 @@ jobs:
           DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           HOST_TOOLS="zksync-os-zisk-prover-${TAG}-${TARGET}.tar.gz"
           GUEST_ELFS="zksync-os-zisk-guest-elfs-${TAG}.tar.gz"
+          VERIFICATION_KEYS="zksync-os-zisk-verification-keys-${TAG}.tar.gz"
           cat > binaries.md <<ENDBODY
           ## Binaries
 
@@ -134,6 +238,7 @@ jobs:
           |:---:|:---:|:---:|:---|
           | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | ${TARGET} (CPU) | [${HOST_TOOLS}](${DL}/${HOST_TOOLS}) | [Attestation](${ATT_URL}) |
           | ⚙️ | ZiSK zkVM guest ELFs (riscv64) | [${GUEST_ELFS}](${DL}/${GUEST_ELFS}) | [Attestation](${ATT_URL}) |
+          | 🔐 | ZiSK verification keys and release manifest | [${VERIFICATION_KEYS}](${DL}/${VERIFICATION_KEYS}) | [Attestation](${ATT_URL}) |
 
           All assets are covered by [SHA256SUMS](${DL}/SHA256SUMS):
 
