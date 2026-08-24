@@ -25,7 +25,7 @@ and the off-chain verification helpers the server calls.
 | `guest-aggregator/` | The ZiSK range-aggregator guest — verifies one per-batch proof per batch inside the zkVM and commits the range binding digest. |
 | `prover/` | The proving daemon (`zksync-os-zisk-prover-service`) — polls the server's `/ZiSK/*` and `/ZiSK-AGG/*` job API, drives the ZiSK toolchain over both ELFs, and submits the results. |
 | `zisk-verifier/` | Off-chain verification helpers. The server calls them to check a submitted proof before it composes the L1 payload. |
-| `tools/` | The EEST conformance lane, the guest-memory benchmark, and the host-side input assemblers. |
+| `tools/` | The committed EEST native-reference corpus and target-emulation lane, the guest-memory benchmark, and host-side input assemblers. |
 | `docker/` | The pinned containers of the reproducible guest builds. |
 
 The Solidity verifiers live in
@@ -73,6 +73,44 @@ record it in `guest/GUEST_PROGRAM_VK` or
 cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 ```
 
+The manually dispatched `Rotate program VK pins` workflow performs that
+derivation for both reproducible ELFs on the high-performance runner. Its
+`base_ref` must contain the reviewed `GUEST_ELF_SHA256` pins. When either
+program VK differs within the selected `rotation_scope`, the workflow opens a
+draft PR containing the pin changes, derivation provenance, ELF digests,
+canonical VKs, and root limbs. A difference outside that explicit scope fails
+the run. A run with current pins records the same identities in its job summary
+without creating a PR.
+
+## Release assets
+
+A published GitHub release starts the release-assets workflow. Alongside the
+guest-ELF and host-tool tarballs, a high-performance runner rebuilds both ELFs,
+checks their committed SHA-256 pins, and derives both program VKs with the CPU
+ZiSK package and the STARK proving key. It also reads the vadcop-final VK from
+that proving key and computes the ZiSK VK hash:
+
+```text
+keccak256(innerProgramVK || aggregatorProgramVK || rootCVadcopFinal)
+```
+
+The release carries the guest-ELF and host-tool tarballs plus a verification-
+key tarball with these files:
+
+| File in `zksync-os-zisk-verification-keys-<tag>.tar.gz` | Contents |
+|---|---|
+| `*.verkey.bin` | Raw ZiSK VK files with four little-endian u64 limbs. |
+| `zisk-release.json` | ELF hashes, canonical VK values, limbs, tag, commit and ZiSK VK hash. |
+
+Consumers pin a release tag, verify the release-level `SHA256SUMS`, extract
+the verification-key tarball, and read the canonical keys from
+`zisk-release.json`. The ELFs are in the adjacent
+`zksync-os-zisk-guest-elfs-<tag>.tar.gz`. The manifest associates each full
+ELF hash with the program VK derived from that ELF. The release job checks the
+derived program VKs against the two committed `GUEST_PROGRAM_VK` pins before
+it uploads any asset. Its job summary presents the ELF digests, canonical VKs,
+root limbs, toolchain version, and ZiSK VK hash before the upload step.
+
 [docs/multiprover.md](docs/multiprover.md) covers where each pin then lands
 in the server config and in the L1 verifier.
 
@@ -96,6 +134,13 @@ ziskemu -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin
 # Execute it through the full proving pipeline, without a proof
 cargo-zisk execute -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
     --emulator -k ~/.zisk/provingKey
+
+# Replay the committed EEST native-reference corpus (the pull-request gate)
+cargo build --release --manifest-path tools/test-utils/Cargo.toml \
+    --bin dump_to_batchinput
+tools/run-eest-native.py \
+    --reader tools/test-utils/target/release/dump_to_batchinput \
+    --output /tmp/zisk-eest-native
 
 # Prove one batch end to end (needs a GPU and both proving keys)
 cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey -g
