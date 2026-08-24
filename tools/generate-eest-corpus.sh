@@ -5,11 +5,14 @@ set -euo pipefail
 # Use a dedicated checkout because enabling the complete fixture index is a
 # deliberate worktree-local mutation.
 
-ZKOS_DUMP_COMMIT=736fd93ca9f20bf576240cc0de92d5d483da15a3
-ZKOS_DUMP_REPOSITORY=antoniolocascio-bot/zksync-os
-ZKOS_DUMP_REF=refs/heads/zisk/state-dump-hook-v030
+ZKOS_DUMP_COMMIT=20fdb610f8a29655dff3b87fc5eeb16340cd8a7b
+ZKOS_DUMP_REPOSITORY=matter-labs/zksync-os
+ZKOS_DUMP_REF=refs/tags/v0.5.0
 ZKOS_UPSTREAM_REPOSITORY=matter-labs/zksync-os
+ZKOS_PROTOCOL_VERSION_MINOR=32
 EEST_VERSION=5.4.0
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+producer_overlay="$script_dir/eest-v0.5.0-production-rig.patch"
 
 if [[ $# -lt 3 ]]; then
     echo "usage: $0 <zksync-os-dump-checkout> <ethereum-fixtures> <output-directory> [filter ...]" >&2
@@ -31,13 +34,26 @@ eest_threads=${EEST_THREADS:-4}
 
 test "$(git -C "$zkos_checkout" rev-parse HEAD)" = "$ZKOS_DUMP_COMMIT"
 test "$(git -C "$zkos_checkout" rev-parse "$ZKOS_DUMP_REF^{commit}")" = "$ZKOS_DUMP_COMMIT"
+if [[ -n $(git -C "$zkos_checkout" status --porcelain --untracked-files=no) ]]; then
+    echo "ERROR: zksync-os checkout has tracked changes; use a clean dedicated worktree" >&2
+    exit 1
+fi
 test -d "$fixtures/stable/state_tests"
 test -d "$fixtures/develop/state_tests"
+test -f "$producer_overlay"
 if [[ -e "$output" ]] && find "$output" -mindepth 1 -print -quit | grep -q .; then
     echo "ERROR: output directory is not empty: $output" >&2
     exit 1
 fi
 mkdir -p "$output/shards" "$work_root/logs"
+
+# The v0.5.0 release contains the state-dump hook and the production feature,
+# but its evm-tester manifest selects the semantics-changing tester feature.
+# Apply the committed one-line overlay so dumps use the tag's existing
+# production feature without depending on a fork.
+git -C "$zkos_checkout" apply --unidiff-zero --check "$producer_overlay"
+git -C "$zkos_checkout" apply --unidiff-zero "$producer_overlay"
+producer_overlay_sha256=$(sha256sum "$producer_overlay" | cut -d' ' -f1)
 
 fixture_link="$zkos_checkout/tests/evm_tester/ethereum-fixtures"
 if [[ ! -e "$fixture_link" ]]; then
@@ -162,7 +178,10 @@ done < "$filters_file"
 RECORDS="$records" SKIPPED_RECORDS="$skipped_records" OUTPUT="$output" \
     EEST_VERSION="$EEST_VERSION" ZKOS_DUMP_REPOSITORY="$ZKOS_DUMP_REPOSITORY" \
     ZKOS_DUMP_REF="$ZKOS_DUMP_REF" \
-    ZKOS_UPSTREAM_REPOSITORY="$ZKOS_UPSTREAM_REPOSITORY" python3 - <<'PY'
+    ZKOS_DUMP_COMMIT="$ZKOS_DUMP_COMMIT" \
+    ZKOS_UPSTREAM_REPOSITORY="$ZKOS_UPSTREAM_REPOSITORY" \
+    ZKOS_PROTOCOL_VERSION_MINOR="$ZKOS_PROTOCOL_VERSION_MINOR" \
+    PRODUCER_OVERLAY_SHA256="$producer_overlay_sha256" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -176,11 +195,16 @@ manifest = {
     "eest_version": os.environ["EEST_VERSION"],
     "native_reference": {
         "repository": os.environ["ZKOS_DUMP_REPOSITORY"],
-        "commit": "736fd93ca9f20bf576240cc0de92d5d483da15a3",
+        "commit": os.environ["ZKOS_DUMP_COMMIT"],
         "source_ref": os.environ["ZKOS_DUMP_REF"],
         "upstream_repository": os.environ["ZKOS_UPSTREAM_REPOSITORY"],
-        "upstream_commit_reachable": False,
-        "protocol_version_minor": 31,
+        "upstream_commit_reachable": True,
+        "protocol_version_minor": int(os.environ["ZKOS_PROTOCOL_VERSION_MINOR"]),
+        "build_overlay": {
+            "file": "tools/eest-v0.5.0-production-rig.patch",
+            "sha256": os.environ["PRODUCER_OVERLAY_SHA256"],
+            "purpose": "select the release tag's production rig feature for evm-tester",
+        },
     },
     "format": {
         "archive": "tar+zstd",

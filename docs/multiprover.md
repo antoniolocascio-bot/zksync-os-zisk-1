@@ -203,6 +203,16 @@ key covers every range width.
 
 ## Wire formats
 
+The server writes the current `BatchInput` wire v5. The guest reads the
+leading version before the positional bincode payload and supports both the
+released v3 schema and current v5 simultaneously; each is normalized into one
+in-memory representation while preserving its `spec_id` and protocol minor.
+Wire v3 can select AtlasV1 through AtlasV3, while wire v5 also carries the
+AtlasV4-only chain-config mode and interop commitment-tree proofs. Wire v4 was
+never released from `main` and is rejected. Supporting old input bytes does not
+preserve the old programVK: any guest code change still produces a new ELF and
+therefore rotates the key.
+
 | Artifact | Size | Layout |
 |---|---|---|
 | Per-batch `vadcop_final` stream | 336168 B | `[minimal=0][n_publics=68][programVK(4)][publics(64)][body][vadcopVK(4)]`, u64 little-endian words |
@@ -236,8 +246,8 @@ is caught at the layer that notices first:
 Current values, with ZiSK v0.18.0:
 
 ```text
-guest ELF sha256      = 80b841c76445dd3c411cc1f11447cc85285521541378821442aef1f7262da932
-guest programVK       = 0x44e3d132399c8f3a03ce9672ba0ca00c6503db918731c7ab46d6faea445236ec
+guest ELF sha256      = 6c487fca080740f08346f95dc7f5b6db49127a8392744b23c233d19e81814a16
+guest programVK       = pending derivation on a prover box (guest/GUEST_PROGRAM_VK)
 aggregator ELF sha256 = f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae
 aggregator programVK  = 0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254
 rootCVadcopFinal      = 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
