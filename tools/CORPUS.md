@@ -16,14 +16,15 @@ spans 35 of the 36 chunks; `static_state_tests` needs a run of its own (see
 
 ## Pull-request native gate
 
-The 35-family baseline is committed under `tools/eest-corpus/` as 28 nonempty
-content-addressed shards plus an explicit list of seven filters that emit no
-state dump. It preserves 10,362 source cases as 8,797 unique canonical state
-transitions. The candidate branch replays every unique transition through
+The 35-family baseline is committed under `tools/eest-corpus/` as 33 nonempty
+content-addressed shards plus two filters that emit no state dump; the manifest
+also records the separate `static/state_tests` exclusion. It preserves 10,605
+source cases as 10,605 unique canonical state transitions. The candidate branch
+replays every transition through
 `dump_to_batchinput` on each pull request:
 
 ```text
-8,797 unique cases → 8,774 pass, 23 deduplicated waivers, 0 unexpected
+10,605 unique cases → 10,589 pass, 16 waivers, 0 unexpected
 ```
 
 The manifest pins EEST v5.4.0, the native state-dump producer commit, case
@@ -33,13 +34,14 @@ transitions in the committed dataset run once. `corpus-waivers.tsv` remains the
 bounded allowlist. Producer witness insertion order can affect regenerated
 shards, so corpus rotations require manifest and data review.
 
-The committed producer is the protocol-v31 fork ref recorded in the manifest;
-its `evm_tester_prod` rig commit is not reachable from any
-`matter-labs/zksync-os` branch or tag. The AtlasV4/Osaka coverage carried by
-`matter-labs/zksync-os-zisk#6` requires a corpus rotation after that PR and the
-producer-rig upstreaming work land.
+The committed producer is the official `matter-labs/zksync-os` v0.5.0 tag at
+protocol minor 32. That release contains the state-dump hook and its production
+rig feature, but the `evm-tester` manifest selects Ethereum-conformance tester
+semantics. The generator applies the committed one-line build overlay recorded
+in the manifest to select the tag's existing `production` feature. No fork or
+unreachable commit is needed, and the exact source transformation is reviewable.
 
-With a prebuilt reader, the full replay took 15.5 seconds at eight-way
+With a prebuilt reader, the full replay took 14.3 seconds at eight-way
 parallelism during local validation. PR CI also builds the reader from the
 candidate branch. It requires neither a second repository checkout nor the
 13 GB fixture tree.
@@ -49,8 +51,8 @@ generation contains pathological long-running cases. The target-emulation lane
 also stays separate: native replay cannot test the ZiSK entrypoint, fcall ABI,
 target memory behavior, or target crypto hooks.
 
-The ZKsync OS 0.5.0 line runs against the `zksync-os-dump-05` worktree and
-guest ELF `7f4cbb6c…`. Its steady state over the 35 chunks is 10,605 cases →
+This ZKsync OS 0.5.0 baseline runs against guest ELF `7f4cbb6c…`. Its steady
+state over the 35 chunks is 10,605 cases →
 10,589 OK, 0 unexpected, and the same two waiver families the 0.4.0 line
 carries. Its `prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008
 cases → 2,008 OK, 0 panics, 0 waived.
@@ -86,26 +88,21 @@ input.bin ──▶ ziskemu + guest ELF ──▶ clean exit or attributed panic
 
 ## From-scratch setup
 
-1. **zksync-os checkout** — for the committed protocol-v31 baseline, clone
-   `antoniolocascio-bot/zksync-os` at the manifest's
-   `zisk/state-dump-hook-v030` ref and pinned commit. The Matter Labs
-   `draft-0.4.0` branch carries a later state-dump hook, but not the
-   `evm_tester_prod` feature alignment used by this corpus. The hook is env-gated
-   by `ZKOS_STATE_DUMP_DIR` and emits one self-contained JSON bundle per executed
-   block: pre/post state (leaves + preimages + roots), signed txs with per-tx
-   `failed` markers, block context, the full native header, and the mid-chain
-   fields (`block_number_before`, `last_block_timestamp_before`,
-   `block_hash_ring_head`).
+1. **zksync-os checkout** — create a clean dedicated worktree at the official
+   `matter-labs/zksync-os` `v0.5.0` tag and pinned commit recorded in the
+   manifest. The release hook is env-gated by `ZKOS_STATE_DUMP_DIR` and emits one
+   self-contained JSON bundle per executed block: pre/post state (leaves +
+   preimages + roots), signed txs with per-tx `failed` markers, block context,
+   the full native header, and the mid-chain fields (`block_number_before`,
+   `last_block_timestamp_before`, `block_hash_ring_head`).
 2. **Production-semantics tester build** — corpus dumps must reflect
-   production execution semantics, so build `evm-tester` with the
-   `evm_tester_prod` feature set. It (a) excludes Ethereum-conformance
-   emulation — no base-fee burn, no mocked precompiles, no blob-tx parsing
-   beyond what production enables — and (b) keeps only the harness-required
-   testing features. `forward_system/evm_tester_prod` expands to
-   `production` + `basic_bootloader/resources_for_tester` +
-   `unlimited_native`, and `tests/evm_tester` depends on
-   `rig` with that feature. Fixture verdict FAILs under these semantics are
-   expected; only executed blocks and their dumps matter.
+   production execution semantics. `generate-eest-corpus.sh` applies
+   `tools/eest-v0.5.0-production-rig.patch`, replacing the tester dependency's
+   `evm_tester` feature with the release's existing `production` feature. This
+   drops base-fee burn, disabled system contracts, mocked `prevrandao`, and
+   EIP-4844 tester behavior while retaining the rig's default test harness.
+   Fixture verdict FAILs under these semantics are expected; only executed
+   blocks and their dumps matter.
 3. **Fixtures** — in `tests/evm_tester/` run `./download_ethereum_fixtures.sh`
    (EEST v5.4.0, ~13 GB unpacked, ~250 MB download).
 4. **ZiSK v0.18.0 toolchain** — release tarball
@@ -187,9 +184,8 @@ emulation status, detail.
   ZiSK 1.0 line); re-run the p256 family then. The two BLS12-381 tripwires
   give the same signal for the cofactor screen and the map-to-curve software
   route; re-run the eip2537 family then.
-- At the AtlasV4/0.5.0 guest bump: re-establish steady state against the
-  0.5.0 line — its semantics drift from v31 (blake2s-merkle header
-  tx/receipt roots, Pectra fee/precompile semantics), so expect a fresh
+- At each protocol bump: regenerate from the matching official native release;
+  header roots, fee rules, precompiles, or wire semantics may require a fresh
   divergence-triage round.
 
 ## Known sharp edges
@@ -198,10 +194,10 @@ emulation status, detail.
   corpus, and its evm_tester log grows to about 118 GB and fills the volume.
   Give that chunk its own run, discard the tester log, and budget about
   twelve hours of emulation.
-- The corpus native build must use the `evm_tester_prod` feature set
-  (production fee/precompile semantics). The stock `evm_tester` features
-  emulate Ethereum semantics (base-fee burn, mocked precompiles) and make
-  every dump diverge from the guest.
+- The corpus native build must apply the committed production-rig overlay.
+  The stock `evm_tester` feature enables Ethereum-conformance semantics
+  (base-fee burn, disabled system contracts, mocked `prevrandao`, and EIP-4844)
+  and makes its dumps diverge from the guest.
 - The runner force-enables all evm_tester index entries (worktree-local
   sed); fixture verdict FAILs under production semantics are expected and
   irrelevant — only executed blocks and their dumps matter.

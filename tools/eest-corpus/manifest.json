@@ -6,266 +6,316 @@
     "case_name": "sha256-of-uncompressed-json"
   },
   "native_reference": {
-    "commit": "736fd93ca9f20bf576240cc0de92d5d483da15a3",
-    "protocol_version_minor": 31,
-    "repository": "antoniolocascio-bot/zksync-os",
-    "source_ref": "refs/heads/zisk/state-dump-hook-v030",
-    "upstream_commit_reachable": false,
+    "build_overlay": {
+      "file": "tools/eest-v0.5.0-production-rig.patch",
+      "purpose": "select the release tag's production rig feature for evm-tester",
+        "sha256": "c56c896a10bbd10f330c4e9983c57ffa95edaf9d8d5f1f3a3f506b77d0aaa6f8"
+    },
+    "commit": "20fdb610f8a29655dff3b87fc5eeb16340cd8a7b",
+    "protocol_version_minor": 32,
+    "repository": "matter-labs/zksync-os",
+    "source_ref": "refs/tags/v0.5.0",
+    "upstream_commit_reachable": true,
     "upstream_repository": "matter-labs/zksync-os"
   },
   "schema_version": 1,
   "shards": [
     {
-      "bytes": 3134,
+      "bytes": 8654,
       "file": "shards/berlin_eip2929_gas_cost_increases.tar.zst",
       "filter": "berlin/eip2929_gas_cost_increases",
       "id": "berlin_eip2929_gas_cost_increases",
-      "sha256": "03332849943f955ce835400b0ccecf85034b6de27e59dd7c920266fc51494c61",
-      "source_cases": 4,
-      "unique_cases": 4
+      "sha256": "e24b586df6678d1c26cfd84c1c544f8773700340e2329fa5b6e513fa208f85c2",
+      "source_cases": 2,
+      "unique_cases": 2
     },
     {
-      "bytes": 957716,
+      "bytes": 880673,
       "file": "shards/berlin_eip2930_access_list.tar.zst",
       "filter": "berlin/eip2930_access_list",
       "id": "berlin_eip2930_access_list",
-      "sha256": "2e45b921dbdf758b376e402f0bf11189fc31f81e4e67c6e110fc9201a7d790b6",
-      "source_cases": 2132,
-      "unique_cases": 1761
+      "sha256": "49d812883dba386ca4ec157b376e6e5ff8d643e9189566bd145da9a098db28a9",
+      "source_cases": 1066,
+      "unique_cases": 1066
     },
     {
-      "bytes": 7148,
+      "bytes": 13937,
       "file": "shards/byzantium_eip196_ec_add_mul.tar.zst",
       "filter": "byzantium/eip196_ec_add_mul",
       "id": "byzantium_eip196_ec_add_mul",
-      "sha256": "181dfff225aef60cfc41aa7537d5f7b91831873ce1a7256b6583c625785238f3",
-      "source_cases": 16,
-      "unique_cases": 12
+      "sha256": "154fecd843c42b379cf1cff879514e5ceacff867e2db5aaa1fb1e4be08cc41f4",
+      "source_cases": 8,
+      "unique_cases": 8
     },
     {
-      "bytes": 4517,
+      "bytes": 10297,
       "file": "shards/byzantium_eip197_ec_pairing.tar.zst",
       "filter": "byzantium/eip197_ec_pairing",
       "id": "byzantium_eip197_ec_pairing",
-      "sha256": "abc980351a7f18a881d0bede4662d1b094cd48628d224f0eaeb97d698c92690c",
-      "source_cases": 8,
-      "unique_cases": 7
-    },
-    {
-      "bytes": 62291,
-      "file": "shards/byzantium_eip198_modexp_precompile.tar.zst",
-      "filter": "byzantium/eip198_modexp_precompile",
-      "id": "byzantium_eip198_modexp_precompile",
-      "sha256": "f5f6fc50fcf785ba45cdbc6136ccb1cdf22aa17ae64567bf017d7a3b842fbe7a",
-      "source_cases": 156,
-      "unique_cases": 126
-    },
-    {
-      "bytes": 350881,
-      "file": "shards/cancun_eip1153_tstore.tar.zst",
-      "filter": "cancun/eip1153_tstore",
-      "id": "cancun_eip1153_tstore",
-      "sha256": "cfca108fb4b59842ee08ea8e8e9a9622db15d4833104b6f6431ef77265137a11",
-      "source_cases": 496,
-      "unique_cases": 470
-    },
-    {
-      "bytes": 186729,
-      "file": "shards/cancun_eip5656_mcopy.tar.zst",
-      "filter": "cancun/eip5656_mcopy",
-      "id": "cancun_eip5656_mcopy",
-      "sha256": "1f24ec214178413a09b3eecf3af0fb59d7fd5fcef23b2c6660d3f1c2f644a616",
-      "source_cases": 372,
-      "unique_cases": 301
-    },
-    {
-      "bytes": 503629,
-      "file": "shards/cancun_eip6780_selfdestruct.tar.zst",
-      "filter": "cancun/eip6780_selfdestruct",
-      "id": "cancun_eip6780_selfdestruct",
-      "sha256": "de6ce43ab5ec7b2980ea408d66c1b3c1ec89dcac5b38ec6f79c6147c00794a4e",
-      "source_cases": 490,
-      "unique_cases": 469
-    },
-    {
-      "bytes": 8752,
-      "file": "shards/cancun_eip7516_blobgasfee.tar.zst",
-      "filter": "cancun/eip7516_blobgasfee",
-      "id": "cancun_eip7516_blobgasfee",
-      "sha256": "d58f29d3437fc4ab252217c79821f3de6e13a4e3a15f0f1a8158886d316218b7",
-      "source_cases": 16,
-      "unique_cases": 15
-    },
-    {
-      "bytes": 68439,
-      "file": "shards/constantinople_eip1014_create2.tar.zst",
-      "filter": "constantinople/eip1014_create2",
-      "id": "constantinople_eip1014_create2",
-      "sha256": "46c37c1016525f47d973c9d191a931d3fd7d7e87ceb67198723c462a73d28380",
-      "source_cases": 96,
-      "unique_cases": 96
-    },
-    {
-      "bytes": 28727,
-      "file": "shards/constantinople_eip145_bitwise_shift.tar.zst",
-      "filter": "constantinople/eip145_bitwise_shift",
-      "id": "constantinople_eip145_bitwise_shift",
-      "sha256": "f5915edbeab720fa1ca3ee9d24580ef4493b70d8ba5bca4469534444628d2060",
-      "source_cases": 12,
-      "unique_cases": 11
-    },
-    {
-      "bytes": 124949,
-      "file": "shards/frontier_create.tar.zst",
-      "filter": "frontier/create",
-      "id": "frontier_create",
-      "sha256": "e4b19ffadbf3ebf121b16ccb8a266f48b258269826e3c8a91466531963f05a49",
-      "source_cases": 48,
-      "unique_cases": 44
-    },
-    {
-      "bytes": 39788,
-      "file": "shards/frontier_identity_precompile.tar.zst",
-      "filter": "frontier/identity_precompile",
-      "id": "frontier_identity_precompile",
-      "sha256": "5ba91f491e1e2403af6d8cab7cece3c341e66288661442be5acd46a8d0fc1e17",
-      "source_cases": 96,
-      "unique_cases": 80
-    },
-    {
-      "bytes": 2172235,
-      "file": "shards/frontier_opcodes.tar.zst",
-      "filter": "frontier/opcodes",
-      "id": "frontier_opcodes",
-      "sha256": "7587f5db82a2864c97d535c651325e7c7efc64c53e0760144e4c26c641ace6f4",
-      "source_cases": 2572,
-      "unique_cases": 2070
-    },
-    {
-      "bytes": 287676,
-      "file": "shards/frontier_precompiles.tar.zst",
-      "filter": "frontier/precompiles",
-      "id": "frontier_precompiles",
-      "sha256": "31f520dd0829a573332a4e3d7e8dc6e3770cf9df2bd1657f1bcea462d9c91b01",
-      "source_cases": 292,
-      "unique_cases": 254
-    },
-    {
-      "bytes": 3303,
-      "file": "shards/homestead_coverage.tar.zst",
-      "filter": "homestead/coverage",
-      "id": "homestead_coverage",
-      "sha256": "54a63beca1cf2acefac22ab7db83d1f24ecd3e51486c4660db24fee193dc3696",
+      "sha256": "b56bf45a932bf6d36782dae49eb34b64f968d2116630b74de001306b05a89020",
       "source_cases": 4,
       "unique_cases": 4
     },
     {
-      "bytes": 13961,
+      "bytes": 75885,
+      "file": "shards/byzantium_eip198_modexp_precompile.tar.zst",
+      "filter": "byzantium/eip198_modexp_precompile",
+      "id": "byzantium_eip198_modexp_precompile",
+      "sha256": "fe3fa01d8507c1e5a91397385bb946b5ccb361b4c08af9ef0b6dbbd203773472",
+      "source_cases": 78,
+      "unique_cases": 78
+    },
+    {
+      "bytes": 318869,
+      "file": "shards/cancun_eip1153_tstore.tar.zst",
+      "filter": "cancun/eip1153_tstore",
+      "id": "cancun_eip1153_tstore",
+      "sha256": "97ff77005e3d99aeb1a12e82bf2a94d3528c6991d7343258be670113e0e47dee",
+      "source_cases": 248,
+      "unique_cases": 248
+    },
+    {
+      "bytes": 212244,
+      "file": "shards/cancun_eip5656_mcopy.tar.zst",
+      "filter": "cancun/eip5656_mcopy",
+      "id": "cancun_eip5656_mcopy",
+      "sha256": "48d922296d29a2bd6693cb7a33cd935700f255c154ab54091c1af4621ac58490",
+      "source_cases": 186,
+      "unique_cases": 186
+    },
+    {
+      "bytes": 421895,
+      "file": "shards/cancun_eip6780_selfdestruct.tar.zst",
+      "filter": "cancun/eip6780_selfdestruct",
+      "id": "cancun_eip6780_selfdestruct",
+      "sha256": "924ef7493d95aa14de60d1296e2a1af6bfb373bf042995afc1fda8e7df1ea69b",
+      "source_cases": 245,
+      "unique_cases": 245
+    },
+    {
+      "bytes": 14873,
+      "file": "shards/cancun_eip7516_blobgasfee.tar.zst",
+      "filter": "cancun/eip7516_blobgasfee",
+      "id": "cancun_eip7516_blobgasfee",
+      "sha256": "b551ac118230c3b24ce1c3372e1f0a1c9b4d0cce959ac9200ffe681dbf888510",
+      "source_cases": 8,
+      "unique_cases": 8
+    },
+    {
+      "bytes": 69874,
+      "file": "shards/constantinople_eip1014_create2.tar.zst",
+      "filter": "constantinople/eip1014_create2",
+      "id": "constantinople_eip1014_create2",
+      "sha256": "1b80cef384248a36e4cde760f9dd4fb3c006cbd689b928fb6369a8c5d4894225",
+      "source_cases": 48,
+      "unique_cases": 48
+    },
+    {
+      "bytes": 36454,
+      "file": "shards/constantinople_eip145_bitwise_shift.tar.zst",
+      "filter": "constantinople/eip145_bitwise_shift",
+      "id": "constantinople_eip145_bitwise_shift",
+      "sha256": "e580053cd43457c287c78abd8c46ecda0a74f8474c1798b912148dcc1cd46e78",
+      "source_cases": 6,
+      "unique_cases": 6
+    },
+    {
+      "bytes": 136217,
+      "file": "shards/frontier_create.tar.zst",
+      "filter": "frontier/create",
+      "id": "frontier_create",
+      "sha256": "57ea6097c4c38f732d9f7b4ecb6d09366259b0262ae4f73ddc7966798cd3e7c1",
+      "source_cases": 24,
+      "unique_cases": 24
+    },
+    {
+      "bytes": 49578,
+      "file": "shards/frontier_identity_precompile.tar.zst",
+      "filter": "frontier/identity_precompile",
+      "id": "frontier_identity_precompile",
+      "sha256": "360d98b2023d81b6b61b05c2223cf96d588e923fefd9047e3f708bdead28dc58",
+      "source_cases": 48,
+      "unique_cases": 48
+    },
+    {
+      "bytes": 1830562,
+      "file": "shards/frontier_opcodes.tar.zst",
+      "filter": "frontier/opcodes",
+      "id": "frontier_opcodes",
+      "sha256": "404b5cf934ce22167c0f92ecdb669c5c532e8d172f44c6d8307d15b9aebfaaf4",
+      "source_cases": 1288,
+      "unique_cases": 1288
+    },
+    {
+      "bytes": 281899,
+      "file": "shards/frontier_precompiles.tar.zst",
+      "filter": "frontier/precompiles",
+      "id": "frontier_precompiles",
+      "sha256": "51b768944e9998a4ffb770f263517bb4de9bbb9fc6ad2ada34b60c8dee18a653",
+      "source_cases": 166,
+      "unique_cases": 166
+    },
+    {
+      "bytes": 8784,
+      "file": "shards/homestead_coverage.tar.zst",
+      "filter": "homestead/coverage",
+      "id": "homestead_coverage",
+      "sha256": "6f9e87f304f06562e6fc21229edd45e39069728491079cdc2d389a871e4eaff8",
+      "source_cases": 2,
+      "unique_cases": 2
+    },
+    {
+      "bytes": 20481,
       "file": "shards/homestead_identity_precompile.tar.zst",
       "filter": "homestead/identity_precompile",
       "id": "homestead_identity_precompile",
-      "sha256": "ed06ede2233b6a140fbc321fa9fb9cce5d364cb9938ea2c741eb5bfa2ed01036",
-      "source_cases": 32,
-      "unique_cases": 29
+      "sha256": "7a69e49661c7d125254622576d627edb8edc1cb5c680f70789da2ed579b23de4",
+      "source_cases": 16,
+      "unique_cases": 16
     },
     {
-      "bytes": 6267,
+      "bytes": 15951,
       "file": "shards/istanbul_eip1344_chainid.tar.zst",
       "filter": "istanbul/eip1344_chainid",
       "id": "istanbul_eip1344_chainid",
-      "sha256": "eb8eeb00dbe844c0f1e0f07dbdbee289469299d49ab49cf431114e4e3066b685",
-      "source_cases": 14,
-      "unique_cases": 11
+      "sha256": "02817dd8dbef35fc0a70ba96a2d6438887cec8ef331b7bdff02ee6bd5f373211",
+      "source_cases": 10,
+      "unique_cases": 10
     },
     {
-      "bytes": 187728,
+      "bytes": 220891,
       "file": "shards/istanbul_eip152_blake2.tar.zst",
       "filter": "istanbul/eip152_blake2",
       "id": "istanbul_eip152_blake2",
-      "sha256": "c9eaf9597277993a6ce9b2c1b641404bdfac9edf13963d5d2850d391ad88736c",
-      "source_cases": 468,
-      "unique_cases": 386
+      "sha256": "2df1bc2c569e186630743b72102f96a68739c141391075b9bebb27e45520b66b",
+      "source_cases": 234,
+      "unique_cases": 234
     },
     {
-      "bytes": 2801,
+      "bytes": 8495,
       "file": "shards/london_eip1559_fee_market_change.tar.zst",
       "filter": "london/eip1559_fee_market_change",
       "id": "london_eip1559_fee_market_change",
-      "sha256": "346974d9b74d9def452c73899abb18fee960c69bc7b190a22a48b6407d6338d3",
-      "source_cases": 4,
-      "unique_cases": 3
+      "sha256": "e65d6d0789d5827e68462e9060879a1a3c7eaa26ad44b81548f6275318d311f0",
+      "source_cases": 2,
+      "unique_cases": 2
     },
     {
-      "bytes": 361284,
+      "bytes": 18065,
+      "file": "shards/osaka_eip7594_peerdas.tar.zst",
+      "filter": "osaka/eip7594_peerdas",
+      "id": "osaka_eip7594_peerdas",
+      "sha256": "065f51551a639eefefc2854283fafa837cdf66bb414a02d2d5481acacccec579",
+      "source_cases": 20,
+      "unique_cases": 20
+    },
+    {
+      "bytes": 45918,
+      "file": "shards/osaka_eip7823_modexp_upper_bounds.tar.zst",
+      "filter": "osaka/eip7823_modexp_upper_bounds",
+      "id": "osaka_eip7823_modexp_upper_bounds",
+      "sha256": "97349338d39f465865113da72f8e92629314aab45c4971e33a000794ee9c4984",
+      "source_cases": 46,
+      "unique_cases": 46
+    },
+    {
+      "bytes": 2195376,
+      "file": "shards/osaka_eip7825_transaction_gas_limit_cap.tar.zst",
+      "filter": "osaka/eip7825_transaction_gas_limit_cap",
+      "id": "osaka_eip7825_transaction_gas_limit_cap",
+      "sha256": "75a0ca3a4d4f651fc563255e0ef6b0e0c87cf1b5c4f0769cab7866a0e135671f",
+      "source_cases": 72,
+      "unique_cases": 72
+    },
+    {
+      "bytes": 396756,
       "file": "shards/osaka_eip7883_modexp_gas_increase.tar.zst",
       "filter": "osaka/eip7883_modexp_gas_increase",
       "id": "osaka_eip7883_modexp_gas_increase",
-      "sha256": "b741a4938cea8123caa4428f5633a84897530086e36f844f20a8fef5ea1a49ac",
-      "source_cases": 604,
-      "unique_cases": 494
+      "sha256": "b616ee3967a2070b513ad1d681028b19ab3008d3f3cec9753229e14c761baaa9",
+      "source_cases": 320,
+      "unique_cases": 320
     },
     {
-      "bytes": 750759,
+      "bytes": 1349823,
+      "file": "shards/osaka_eip7939_count_leading_zeros.tar.zst",
+      "filter": "osaka/eip7939_count_leading_zeros",
+      "id": "osaka_eip7939_count_leading_zeros",
+      "sha256": "d8a170fd21127d4a484efcd604e3cf475c8aad5396e5d481096aea4487c72b0b",
+      "source_cases": 1196,
+      "unique_cases": 1196
+    },
+    {
+      "bytes": 839120,
       "file": "shards/osaka_eip7951_p256verify_precompiles.tar.zst",
       "filter": "osaka/eip7951_p256verify_precompiles",
       "id": "osaka_eip7951_p256verify_precompiles",
-      "sha256": "b2b30aa491e6464798bc80b8edfd515960d7114ce72f03f0844e0e44a1993918",
+      "sha256": "0ce8997be01d3cf0cd2e3439f63a0766ae954c30da80a9b05a79b29e224f0e32",
       "source_cases": 794,
       "unique_cases": 794
     },
     {
-      "bytes": 71764,
+      "bytes": 80943,
       "file": "shards/paris_eip7610_create_collision.tar.zst",
       "filter": "paris/eip7610_create_collision",
       "id": "paris_eip7610_create_collision",
-      "sha256": "162f756ba5c71b8783707895266d2f02b376daeff388a52355e7dfccf86e7cbc",
-      "source_cases": 180,
-      "unique_cases": 158
+      "sha256": "91cf5d7172d5897b711d874d7ff55cc093cde731920d7e470eb4bfdab46a6fbd",
+      "source_cases": 90,
+      "unique_cases": 90
     },
     {
-      "bytes": 8061,
+      "bytes": 2455627,
       "file": "shards/prague_eip2537_bls_12_381_precompiles.tar.zst",
       "filter": "prague/eip2537_bls_12_381_precompiles",
       "id": "prague_eip2537_bls_12_381_precompiles",
-      "sha256": "a544c207e6422d197f55ff4c73c0fe36f1b2baf375414167aed168fd450713f4",
-      "source_cases": 14,
-      "unique_cases": 11
+      "sha256": "1c6210b1cd4a7a9cc277f63edd3de851b1b575da99957b48fc91f157b8b99057",
+      "source_cases": 2008,
+      "unique_cases": 2008
     },
     {
-      "bytes": 5651133,
+      "bytes": 913914,
+      "file": "shards/prague_eip7623_increase_calldata_cost.tar.zst",
+      "filter": "prague/eip7623_increase_calldata_cost",
+      "id": "prague_eip7623_increase_calldata_cost",
+      "sha256": "9211ec7dc1f226eb82c795ffa81c498fcee7bf8f784e3824e448f39cb100425b",
+      "source_cases": 966,
+      "unique_cases": 966
+    },
+    {
+      "bytes": 3263922,
       "file": "shards/prague_eip7702_set_code_tx.tar.zst",
       "filter": "prague/eip7702_set_code_tx",
       "id": "prague_eip7702_set_code_tx",
-      "sha256": "e7a0df4bcf6ce15f31f36d62adbddea7b6a2073e125307826912b97b17151e85",
-      "source_cases": 1090,
-      "unique_cases": 898
+      "sha256": "c693be68ee7440440059f169cae71a2105fbf69a8c85f04660b5511fafc2cfc6",
+      "source_cases": 1228,
+      "unique_cases": 1228
     },
     {
-      "bytes": 28934,
+      "bytes": 35259,
       "file": "shards/shanghai_eip3651_warm_coinbase.tar.zst",
       "filter": "shanghai/eip3651_warm_coinbase",
       "id": "shanghai_eip3651_warm_coinbase",
-      "sha256": "30d9881589d163274e1f16351541b4ebf4269fe266ec4fbb2672be1c921edf85",
-      "source_cases": 64,
-      "unique_cases": 61
+      "sha256": "6a9feb3466f7f1b1c0c7464b7da455c2366e921bf174c22bda1d4c6defcac365",
+      "source_cases": 32,
+      "unique_cases": 32
     },
     {
-      "bytes": 18010,
+      "bytes": 25190,
       "file": "shards/shanghai_eip3855_push0.tar.zst",
       "filter": "shanghai/eip3855_push0",
       "id": "shanghai_eip3855_push0",
-      "sha256": "9e507204023933a57e0e003bdf6e3ca6bdbe2323d4ffebb3bf5852d1ef4ddad8",
-      "source_cases": 40,
-      "unique_cases": 35
+      "sha256": "bd34c5f5656dad4700a83bf5df3e1d807f5621bb2853332f7eefb3424fd7c83c",
+      "source_cases": 20,
+      "unique_cases": 20
     },
     {
-      "bytes": 132339,
+      "bytes": 129790,
       "file": "shards/shanghai_eip3860_initcode.tar.zst",
       "filter": "shanghai/eip3860_initcode",
       "id": "shanghai_eip3860_initcode",
-      "sha256": "f84c4a00e39e3d3a038976f4a34ad9f4d524a6da468786f589c214022472c036",
-      "source_cases": 248,
-      "unique_cases": 193
+      "sha256": "8a0fd1b50afab89429fc600d5f2b9ea3c5206577787616bfef80ca73583de5cb",
+      "source_cases": 124,
+      "unique_cases": 124
     }
   ],
   "skipped_filters": [
@@ -280,28 +330,8 @@
     {
       "filter": "frontier/touch",
       "reason": "no state dumps; evm-tester exit 0"
-    },
-    {
-      "filter": "osaka/eip7594_peerdas",
-      "reason": "no state dumps; evm-tester exit 0"
-    },
-    {
-      "filter": "osaka/eip7823_modexp_upper_bounds",
-      "reason": "no state dumps; evm-tester exit 0"
-    },
-    {
-      "filter": "osaka/eip7825_transaction_gas_limit_cap",
-      "reason": "no state dumps; evm-tester exit 0"
-    },
-    {
-      "filter": "osaka/eip7939_count_leading_zeros",
-      "reason": "no state dumps; evm-tester exit 0"
-    },
-    {
-      "filter": "prague/eip7623_increase_calldata_cost",
-      "reason": "no state dumps; evm-tester exit 0"
     }
   ],
-  "source_case_count": 10362,
-  "unique_case_count": 8797
+  "source_case_count": 10605,
+  "unique_case_count": 10605
 }

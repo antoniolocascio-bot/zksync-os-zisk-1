@@ -14,12 +14,11 @@ from the canonical payload rather than the producer's parallel case counter.
 `skipped_filters` records fixture families the pinned producer cannot parse or
 execute, so the committed coverage boundary stays explicit.
 
-The per-PR corpus covers the established 35-family baseline.
+The per-PR corpus covers the established 35-family baseline from the official
+ZKsync OS v0.5.0 release at protocol minor 32. It contains 33 nonempty shards;
+the manifest records two filters that emit no dump and the separate
 `static/state_tests` is listed as excluded because its native producer includes
 pathological long-running cases; it remains a separate resource-bounded run.
-This baseline targets protocol minor 31. It does not represent the
-AtlasV4/Osaka corpus exercised by `matter-labs/zksync-os-zisk#6`; rotate it
-after that work lands.
 
 Run the committed gate locally:
 
@@ -31,13 +30,13 @@ tools/run-eest-native.py \
   --output /tmp/zisk-eest-native
 ```
 
-Regeneration needs a dedicated checkout of
-`antoniolocascio-bot/zksync-os` at branch
-`zisk/state-dump-hook-v030` and the commit recorded in the generator, plus the
-official EEST v5.4.0 stable and develop fixtures. That producer commit is not
-reachable from a branch or tag in `matter-labs/zksync-os`. Keep the fork
-attribution until its `evm_tester_prod` rig alignment lands there; without the
-fork ref, regeneration is blocked.
+Regeneration needs a clean dedicated checkout of `matter-labs/zksync-os` at the
+official `v0.5.0` tag and commit recorded in the generator, plus the official
+EEST v5.4.0 stable and develop fixtures. The release contains the state-dump
+hook and a production rig feature, but its `evm-tester` manifest selects the
+Ethereum-conformance feature. The generator applies the checked-in one-line
+`tools/eest-v0.5.0-production-rig.patch`; the manifest records its SHA-256 so
+the official source plus the exact build transformation remain reproducible.
 
 ```bash
 CARGO_TARGET_DIR=/path/to/fresh-target \
