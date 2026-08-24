@@ -51,7 +51,7 @@ generation contains pathological long-running cases. The target-emulation lane
 also stays separate: native replay cannot test the ZiSK entrypoint, fcall ABI,
 target memory behavior, or target crypto hooks.
 
-This ZKsync OS 0.5.0 baseline runs against guest ELF `7f4cbb6c…`. Its steady
+This ZKsync OS 0.5.0 baseline runs against guest ELF `6c487fca…`. Its steady
 state over the 35 chunks is 10,605 cases →
 10,589 OK, 0 unexpected, and the same two waiver families the 0.4.0 line
 carries. Its `prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008
