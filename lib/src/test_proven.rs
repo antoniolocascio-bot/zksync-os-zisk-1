@@ -2911,7 +2911,9 @@ mod tests {
         let digits: Vec<u8> = source.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
         assert_eq!(digits.len() % 2, 0, "hex fixture has an odd digit count");
         digits
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let pair = core::str::from_utf8(pair).unwrap();
                 u8::from_str_radix(pair, 16).unwrap()
