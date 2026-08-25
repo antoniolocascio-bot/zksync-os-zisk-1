@@ -178,15 +178,8 @@ check "aggregated fixture rootCVadcopFinal" \
 echo "==> independently recomputing the binding digest"
 "${TOOLS_DIR}/check_binding_digest" "${inner_program_vk}" "${root_c_vadcop_final}" \
     "${proved_commitments[@]}" | tee "${SESSION_DIR}/binding-digest.txt"
-chained_pi="$(field "${SESSION_DIR}/binding-digest.txt" chained_pi)"
+range_public_input="$(field "${SESSION_DIR}/binding-digest.txt" range_public_input)"
 binding_digest="$(field "${SESSION_DIR}/binding-digest.txt" binding_digest)"
-mapfile -t chained_trace < <(
-    grep -E '^chained_after\[[0-3]\]' "${SESSION_DIR}/binding-digest.txt" | awk '{print $3}'
-)
-if [[ "${#chained_trace[@]}" -ne 4 ]]; then
-    echo "ERROR: independent checker did not emit four chain values" >&2
-    exit 1
-fi
 check "binding digest (independent fold)" "${binding_digest}" \
     "$(field "${SESSION_DIR}/aggregated-inspect.txt" 'publics\[0..32\]')"
 
@@ -198,11 +191,7 @@ jq -n \
     --arg c2 "${proved_commitments[1]}" \
     --arg c3 "${proved_commitments[2]}" \
     --arg c4 "${proved_commitments[3]}" \
-    --arg a1 "${chained_trace[0]}" \
-    --arg a2 "${chained_trace[1]}" \
-    --arg a3 "${chained_trace[2]}" \
-    --arg a4 "${chained_trace[3]}" \
-    --arg chained_pi "${chained_pi}" \
+    --arg range_public_input "${range_public_input}" \
     --arg binding_digest "${binding_digest}" \
     '{
         schema_version: 1,
@@ -210,8 +199,7 @@ jq -n \
         input_manifest: $input_manifest[0],
         cargo_zisk_version: $cargo_zisk_version,
         proved_commitments: [$c1, $c2, $c3, $c4],
-        chained_trace: [$a1, $a2, $a3, $a4],
-        chained_pi: $chained_pi,
+        range_public_input: $range_public_input,
         binding_digest: $binding_digest,
         repository_updates: [
             "guest-aggregator/BINDING_VECTOR.md",
@@ -257,7 +245,7 @@ echo "==> writing SUMMARY.md"
         echo "| \`${filename}\` | \`${framed_hash}\` | \`${native_commitments[$index]}\` | \`${proved_commitments[$index]}\` | equal |"
     done
     echo
-    echo "Chained public input: \`${chained_pi}\`"
+    echo "Range public input: \`${range_public_input}\`"
     echo
     echo "Final binding digest: \`${binding_digest}\`"
     echo

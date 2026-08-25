@@ -31,16 +31,11 @@ def load_values(path: Path) -> dict:
     if values.get("schema_version") != 1:
         raise ValueError("unsupported fixture-values schema")
     commitments = values.get("proved_commitments")
-    trace = values.get("chained_trace")
     if not isinstance(commitments, list) or len(commitments) != 4:
         raise ValueError("expected four proved commitments")
-    if not isinstance(trace, list) or len(trace) != 4:
-        raise ValueError("expected four chained values")
     for index, value in enumerate(commitments):
         unprefixed(value, f"proved_commitments[{index}]")
-    for index, value in enumerate(trace):
-        unprefixed(value, f"chained_trace[{index}]")
-    for key in ("chained_pi", "binding_digest"):
+    for key in ("range_public_input", "binding_digest"):
         unprefixed(values[key], key)
     metadata = values["metadata"]
     for key in ("inner_program_vk", "aggregator_program_vk", "root_c_vadcop_final"):
@@ -59,12 +54,10 @@ def load_values(path: Path) -> dict:
             or re.fullmatch(r"[0-9a-f]{64}", record.get("framed_input_sha256", "")) is None
         ):
             raise ValueError(f"input manifest record {index} is inconsistent")
-    if trace[-1] != values["chained_pi"]:
-        raise ValueError("final chained trace value differs from chained_pi")
     return values
 
 
-def update_rust_vector(path: Path, values: dict, include_chained: bool) -> None:
+def update_rust_vector(path: Path, values: dict, include_range: bool) -> None:
     source = path.read_text()
     metadata = values["metadata"]
     scalar = {
@@ -72,8 +65,8 @@ def update_rust_vector(path: Path, values: dict, include_chained: bool) -> None:
         "ROOT_C_VADCOP_FINAL": metadata["root_c_vadcop_final"],
         "DIGEST": values["binding_digest"],
     }
-    if include_chained:
-        scalar["CHAINED_PI"] = values["chained_pi"]
+    if include_range:
+        scalar["RANGE_PUBLIC_INPUT"] = values["range_public_input"]
     for name, value in scalar.items():
         source = replace_once(
             source,
@@ -98,7 +91,6 @@ def render_binding_vector(values: dict) -> str:
     metadata = values["metadata"]
     manifest = values["input_manifest"]
     commitments = values["proved_commitments"]
-    trace = values["chained_trace"]
     date = metadata["session_date"]
     run_url = metadata["run_url"]
     inputs = "\n".join(
@@ -108,12 +100,7 @@ def render_binding_vector(values: dict) -> str:
     commitment_lines = "\n".join(
         f"commitment_{index} = {value}" for index, value in enumerate(commitments, 1)
     )
-    pi_lines = "\n".join(
-        f"PI[{index}] = 0x00000000{unprefixed(value, 'commitment')[:56]}"
-        for index, value in enumerate(commitments)
-    )
-    trace_lines = [f"seed (= PI[0]) = {trace[0]}"]
-    trace_lines.extend(f"after PI[{index}]    = {trace[index]}" for index in range(1, 4))
+    preimage = " ‖ ".join(f"commitment_{index}" for index in range(1, len(commitments) + 1))
     return f"""## Inputs (real 4-batch aggregation session, ZiSK v0.18.0, {date})
 
 This vector was produced by [fixture-session run]({run_url}) from
@@ -148,25 +135,26 @@ Batch commitments, in order:
 {commitment_lines}
 ```
 
-## Chain trace
+## Fold trace
 
-Per-batch public inputs (`commitment >> 32`):
-
-```text
-{pi_lines}
-```
-
-Accumulator after each step:
+The per-batch public inputs enter the keccak untruncated, in batch order,
+as one {32 * len(commitments)}-byte preimage:
 
 ```text
-{chr(10).join(trace_lines)}
+preimage         = {preimage}
+rangePublicInput = uint256(keccak256(preimage)) >> 32
 ```
+
+This vector holds one range size. `range_sizes_match_the_settlement_formula`
+in `src/lib.rs` pins N = 1, N = 2 and N = 4 over a commitment set of its
+own, which no session rotation moves, and so covers both branches of the
+formula.
 
 ## Pinned outputs
 
 ```text
-chainedPI = {values['chained_pi']}
-digest    = {values['binding_digest']}
+rangePublicInput = {values['range_public_input']}
+digest           = {values['binding_digest']}
 ```
 
 The real aggregated proof of this range commits the same digest: the
@@ -189,9 +177,9 @@ def update_repository(root: Path, values: dict, vadcop: Path) -> None:
         raise ValueError(f"{doc}: missing Inputs section")
     doc.write_text(prefix + render_binding_vector(values))
 
-    update_rust_vector(root / "guest-aggregator/src/lib.rs", values, include_chained=True)
+    update_rust_vector(root / "guest-aggregator/src/lib.rs", values, include_range=True)
     update_rust_vector(
-        root / "prover/tests/real_aggregation_vector.rs", values, include_chained=False
+        root / "prover/tests/real_aggregation_vector.rs", values, include_range=False
     )
     destination = root / "prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
     if not vadcop.is_file() or vadcop.stat().st_size == 0:

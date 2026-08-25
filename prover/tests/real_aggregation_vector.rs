@@ -11,7 +11,7 @@
 //!   verifies the pinned `innerProgramVK`, `rootCVadcopFinal`, and
 //!   `commitment_1` rather than passing while checking nothing.
 //! - [`real_proofs_reproduce_binding_vector`] reproduces the full 4-batch
-//!   chained digest, but the other three ~370 KB proofs live outside the
+//!   range digest, but the other three ~370 KB proofs live outside the
 //!   repo; point `ZISK_AGG_SESSION_DIR` at a directory holding
 //!   `vadcop-batch-{1..4}.bin` to run it. Absent the variable it skips
 //!   LOUDLY (see the note there) instead of masquerading as a pass.
@@ -28,7 +28,7 @@ const COMMITMENTS: [&str; 4] = [
     "8f03a8b3b8b78ef7ab5004817c9ebf211b09533b9a0ad86440396f4605ab794b",
     "3db0606d441cb57e9c621be9052e759db43e7c5c608c6e810ce673d9a4503c45",
 ];
-const DIGEST: &str = "8d3dc379548b65d0ed7df762dc646bf46fdbdf628cfe483479392ea8159e405b";
+const DIGEST: &str = "15fd80a250aa290d7bbf88b214a78cfed6f9fc1c8a094dae82762739f1e7fbf5";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -88,7 +88,7 @@ fn real_proofs_reproduce_binding_vector() {
             "NOTE: real_proofs_reproduce_binding_vector SKIPPED. Set \
              ZISK_AGG_SESSION_DIR to a directory containing \
              vadcop-batch-{{1..4}}.bin to reproduce the full 4-batch \
-             chained digest. The committed batch-1 fixture is still \
+             range digest. The committed batch-1 fixture is still \
              verified unconditionally by \
              binding_vector_batch1_matches_committed_fixture."
         );

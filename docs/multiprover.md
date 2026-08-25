@@ -187,9 +187,10 @@ key covers every range width.
    per-batch stream in it exists.
 6. **Range proving** (this repo, `prover/`): the aggregator guest verifies
    one inner proof per batch inside the zkVM and commits
-   `keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ chainedPI)`, where
-   `chainedPI` is the self-seeded chain of batch commitments — exactly what
-   the L1 range verifier recomputes from its own pins
+   `keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)`, where
+   `rangePublicInput` is the settlement layer's fold over the batch
+   commitments — exactly what the L1 range verifier recomputes from its own
+   pins
    (`guest-aggregator/BINDING_VECTOR.md` pins a cross-stack test vector).
    The daemon wraps the range proof in Plonk and submits it.
 7. **Rendezvous** (server): `multiproof_combine` composes the combined
@@ -248,8 +249,8 @@ Current values, with ZiSK v0.18.0:
 ```text
 guest ELF sha256      = 6c487fca080740f08346f95dc7f5b6db49127a8392744b23c233d19e81814a16
 guest programVK       = pending derivation on a prover box (guest/GUEST_PROGRAM_VK)
-aggregator ELF sha256 = f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae
-aggregator programVK  = 0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254
+aggregator ELF sha256 = d886c4cdfa10e8c106592f8698504b6fd4df619e0889974a792bf7e6762a2bb8
+aggregator programVK  = pending derivation on a prover box (guest-aggregator/GUEST_PROGRAM_VK)
 rootCVadcopFinal      = 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
 ```
 
