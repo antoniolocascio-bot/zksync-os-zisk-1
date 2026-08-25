@@ -3,14 +3,24 @@
 # ROM image share it.
 # Serialization: the four ROM root-hash u64 limbs, big-endian, in order —
 # identical to the prover daemon's public-values prefix and the server's
-# compiled ZiSK release manifest.
+# `prover_api.zisk_vks[].program_vk` expectation.
 #
 # Derived with cargo-zisk 0.18.0 on 2026-08-25 by
-# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32816250957
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32828103104
 # from the reproducible container ELF with sha256
-# 306501cbb866fd73c735e01d2026911a7f5309ef301e75e63c46600ec74f1e1e:
+# ac5b351ee31b3929fb9cb5a63ed3dfbff6609b3af04f1f3d0febfacc12d1c1f3:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 #
-# Root hash limbs: [9359950528683563713, 496374717852354135,
-#                   2188493718940594110, 17820487090703344188]
-0x81e5396a2969dac106e37a2d0d1306571e5f177136a0afbef74f16978dcea23c
+# Root hash limbs: [9324920540708014748, 8809135547294377884,
+#                   14330412989579270068, 18349445223923896448]
+0x8168c5d383a50a9c7a40561b82bf679cc6dfdab0308417b4fea653362d78d080
+
+# History: 0x4b1b8e583ed8f62b9af9bb13c96e922b10acd14f897070df3fd8618058da6eb7
+# (retired 2026-08-25 when the zksync-os-revm dependency source changed from
+# the commit rev to the official v0.3.0 tag; originally derived by
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32825093963).
+
+# History: 0x81e5396a2969dac106e37a2d0d1306571e5f177136a0afbef74f16978dcea23c
+# (retired 2026-08-25 when the official zksync-os-revm v0.3.0 dependency
+# changed the guest ELF; originally derived by
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32816250957).
