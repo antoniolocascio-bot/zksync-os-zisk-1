@@ -29,7 +29,6 @@ def word(byte: int) -> str:
 
 def values() -> dict:
     commitments = [word(value) for value in range(0x11, 0x15)]
-    trace = [word(value) for value in range(0x21, 0x25)]
     inner = word(0x31)
     aggregator = word(0x32)
     root = word(0x33)
@@ -63,8 +62,7 @@ def values() -> dict:
             ],
         },
         "proved_commitments": commitments,
-        "chained_trace": trace,
-        "chained_pi": trace[-1],
+        "range_public_input": word(0x21),
         "binding_digest": digest,
     }
 

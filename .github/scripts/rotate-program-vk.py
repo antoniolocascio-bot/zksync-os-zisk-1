@@ -79,8 +79,9 @@ def record_header(kind: str) -> list[str]:
         ]
     return [
         "# programVK (ZiSK ROM merkle root) of the aggregator guest ELF with the",
-        "# L1-aligned binding fold (digest = keccak(innerVK ‖ rootC ‖ chainedPI),",
-        "# chainedPI = the contract's _computeZKsyncOSHash chain).",
+        "# settlement layer's linear binding fold",
+        "# (digest = keccak(innerVK ‖ rootC ‖ rangePublicInput), rangePublicInput =",
+        "# ZKsyncOSVerifier.computeZKsyncOSHash over the batch public inputs).",
         "# The value covers the ROM image only, so two ELFs that differ outside the",
         "# ROM image share it.",
         "# Serialization: the four ROM root-hash u64 limbs, big-endian, in order.",

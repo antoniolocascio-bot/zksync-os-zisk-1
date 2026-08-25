@@ -1,5 +1,5 @@
 //! ZiSK aggregator guest: verifies N `vadcop_final` proofs of the STF guest
-//! and commits the L1 binding digest over their chained batch public inputs.
+//! and commits the L1 binding digest over their folded batch public inputs.
 //!
 //! Verification runs pil2-proofman's `proofman-verifier` via ZiSK's own
 //! `ziskos::zisklib::verify_zisk_proof` (no_std, Poseidon2-16 transcript and
@@ -15,7 +15,7 @@
 //!     `cargo-zisk` clients obtain from `get_proof_bytes()`.
 //!
 //! Stream layout, section offsets, validation rules, and the committed
-//! output (the `MultiProofVerifier`-aligned binding digest) are defined
+//! output (the settlement-layer-aligned binding digest) are defined
 //! once in this package's library (`src/lib.rs`), which is host-tested and
 //! shared with the input assembler; this binary only wires it to `ziskos`.
 

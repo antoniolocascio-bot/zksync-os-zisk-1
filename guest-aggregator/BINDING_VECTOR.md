@@ -7,44 +7,46 @@ codebases pin these exact values and must stay in lockstep:
 - this guest (`cross_stack_binding_vector` in `src/lib.rs` and the
   real-proof test in `prover/tests/real_aggregation_vector.rs`),
 - the server's aggregation job validation,
-- the L1 `MultiProofVerifier` integration tests.
+- the L1 range-verifier integration tests.
 
 Update all pins together whenever any input rotates.
 
 ## Formula
 
 ```text
-digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ chainedPI)
+digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)
 ```
 
 - `innerProgramVK` — 32 bytes: the STF guest's 4 ROM-root u64 limbs,
   big-endian each, in order (wire public-values bytes `[0..32]`).
 - `rootCVadcopFinal` — 32 bytes: the 4 vadcop-final VK u64 limbs,
   big-endian each, in order (wire public-values bytes `[288..320]`).
-- `chainedPI` — 32-byte big-endian uint256:
-  `MultiProofVerifier._computeZKsyncOSHash(0, PI)` over the per-batch
-  public inputs in batch order:
+- `rangePublicInput` — 32-byte big-endian uint256: the settlement layer's
+  `ZKsyncOSVerifier.computeZKsyncOSHash(0, publicInputs)` over the
+  per-batch public inputs in batch order:
 
   ```text
-  result = PI[0]                                      // initialHash == 0
-  for i in 1..N:
-      result = uint256(keccak256(abi.encodePacked(result, PI[i]))) >> 32
-  chainedPI = result
+  folded = N == 1 ? PI[0] : uint256(keccak256(abi.encodePacked(PI)))
+  rangePublicInput = folded >> PUBLIC_INPUT_SHIFT      // PUBLIC_INPUT_SHIFT = 32
   ```
 
-- `PI[i]` — the per-batch public input as L1 consumes it:
-  `uint256(commitment_i) >> 32`, where `commitment_i` is batch i's full
-  32-byte commitment (wire public-values bytes `[32..64]` of its ZiSK
-  proof) read as a big-endian uint256. Every chain value is 224-bit
-  (`PUBLIC_INPUT_SHIFT = 32`), carried as a 32-byte big-endian word with
-  the top 4 bytes zero.
+  A one-batch range performs no keccak. This is an invariant of the
+  settlement layer, and single-batch ranges are the common case.
+
+- `PI[i]` — the per-batch public input the settlement layer supplies:
+  batch i's full 32-byte commitment (wire public-values bytes `[32..64]`
+  of its ZiSK proof) read as a big-endian uint256. The fold consumes it
+  untruncated. `PUBLIC_INPUT_SHIFT` applies once, to the folded result,
+  so `rangePublicInput` is 224-bit and its top 4 bytes are zero.
+
+The settlement layer rejects a non-zero carried hash, so a range carries
+no continuation input.
 
 ## Inputs (real 4-batch aggregation session, ZiSK v0.18.0, 2026-08-21)
 
-Session data: guest ELF sha256
+The inputs below come from a real proving session. Session data: guest ELF
+sha256
 `80b841c76445dd3c411cc1f11447cc85285521541378821442aef1f7262da932`,
-aggregator ELF sha256
-`f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae`,
 guest repo @ `055e720` (tag 0.0.2), 4 sealed v31 batches of a
 `CURRENT_TO_MULTIPROVER_L1` test chain, proved by the server repo's
 zisk-fixture-session workflow (run 32503874362) with both programVKs
@@ -80,35 +82,50 @@ commitment_3 = 0x8f03a8b3b8b78ef7ab5004817c9ebf211b09533b9a0ad86440396f4605ab794
 commitment_4 = 0x3db0606d441cb57e9c621be9052e759db43e7c5c608c6e810ce673d9a4503c45
 ```
 
-## Chain trace
+## Fold trace
 
-Per-batch public inputs (`commitment >> 32`):
-
-```text
-PI[0] = 0x000000005aa9a30847d37bb20955cfe6a65c916d4d0c504c8e5bb0965db8a90a
-PI[1] = 0x00000000167bf6f9edbe48835b6b60e98af53552b0126765a804b86a3d7749da
-PI[2] = 0x000000008f03a8b3b8b78ef7ab5004817c9ebf211b09533b9a0ad86440396f46
-PI[3] = 0x000000003db0606d441cb57e9c621be9052e759db43e7c5c608c6e810ce673d9
-```
-
-Accumulator after each step:
+The four per-batch public inputs enter the keccak untruncated, in batch
+order, as one 128-byte preimage:
 
 ```text
-seed (= PI[0]) = 0x000000005aa9a30847d37bb20955cfe6a65c916d4d0c504c8e5bb0965db8a90a
-after PI[1]    = 0x000000005a28fede239385266dd011a1e789117fb08b78253d2dd4fb3e3e610a
-after PI[2]    = 0x000000000fdf9d9edb975a6b6e0bb5a5c771f0ad8d29094bc536542deb275c64
-after PI[3]    = 0x0000000076b405f665d8b8b9c069b298656c9ef179632673523db317aeaa88b6
+preimage = commitment_1 ‖ commitment_2 ‖ commitment_3 ‖ commitment_4
+keccak256(preimage) = 0xa71a9887b866c0837965ac66c2710d8232871ba878798109a919ea017b3d10b5
+rangePublicInput    = 0x00000000a71a9887b866c0837965ac66c2710d8232871ba878798109a919ea01
 ```
+
+This vector holds one range size. `range_sizes_match_the_settlement_formula`
+in `src/lib.rs` pins N = 1, N = 2 and N = 4 over a commitment set of its
+own, which no session rotation moves, and so covers both branches of the
+formula.
 
 ## Pinned outputs
 
 ```text
-chainedPI = 0x0000000076b405f665d8b8b9c069b298656c9ef179632673523db317aeaa88b6
-digest    = 0x8d3dc379548b65d0ed7df762dc646bf46fdbdf628cfe483479392ea8159e405b
+rangePublicInput = 0x00000000a71a9887b866c0837965ac66c2710d8232871ba878798109a919ea01
+digest           = 0x15fd80a250aa290d7bbf88b214a78cfed6f9fc1c8a094dae82762739f1e7fbf5
 ```
 
-The real aggregated proof of this range commits the same digest: the
-PLONK-wrapped aggregate has wire public-values bytes `[32..64]` equal to
-`digest`, bytes `[0..32]` equal to the aggregator programVK
-`0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254`, and
-bytes `[288..320]` equal to `rootCVadcopFinal`.
+## Provenance of each number
+
+Computed from the formula above, over the recorded session commitments,
+and reproducible with any keccak tool:
+
+- `keccak256(preimage)`, `rangePublicInput` and `digest`.
+
+Recorded from the real proving session:
+
+- `innerProgramVK`, `rootCVadcopFinal`, `commitment_1` … `commitment_4`,
+  and the inner guest ELF sha256. These come from the state-transition
+  guest and the ZiSK v0.18.0 setup, both outside the aggregator fold, so
+  the per-batch proofs and the committed batch-1 fixture hold.
+
+Pending a prover box:
+
+- the aggregator programVK, which rotates with the aggregator ELF (sha256
+  `d886c4cdfa10e8c106592f8698504b6fd4df619e0889974a792bf7e6762a2bb8`;
+  `GUEST_PROGRAM_VK` carries the pending marker and the derivation
+  command),
+- an aggregated range proof that commits `digest` at wire public-values
+  bytes `[32..64]`. Run `.github/workflows/fixture-session.yaml` to
+  produce one, and record the aggregator programVK it reports at wire
+  public-values bytes `[0..32]`.
