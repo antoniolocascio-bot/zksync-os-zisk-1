@@ -4,12 +4,19 @@
 //!
 //! Both the corpus reader (`dump_to_batchinput`) and the divergence validator
 //! call this code, so the two report on the same comparison.
+//!
+//! It also holds the witness oracles, which ask the other question about the
+//! same batch: does the guest verify that witness, or only execute it?
 
 pub mod dump;
 pub mod native_check;
+pub mod witness_oracle;
 
 pub use dump::{build_batch_input, Conversion, ConversionStats, HeaderHashCheck, StateDumpBundle};
 pub use native_check::{check_against_native, Axis, AxisComparison, CheckEvent, NativeCheck};
+pub use witness_oracle::{
+    evaluate_all, oracles, statement_digest, Outcome, WitnessOracle, WitnessSoundness,
+};
 
 /// The message a caught panic carried. Guest asserts are its rejection
 /// mechanism, so the message is the verdict's detail.

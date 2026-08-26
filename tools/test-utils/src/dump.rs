@@ -1073,7 +1073,7 @@ pub fn build_batch_input(d: &StateDumpBundle, header_hash_check: HeaderHashCheck
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn synthetic_bundle_json() -> String {
@@ -1139,11 +1139,9 @@ mod tests {
         assert_eq!(d.last_block_timestamp_before, 0);
     }
 
-    /// Full-pipeline plumbing check: a self-consistent empty-block bundle
-    /// (reference values computed with the lib's own commitment functions)
-    /// must build and pass every validation check.
-    #[test]
-    fn empty_block_bundle_builds_and_validates() {
+    /// A self-consistent bundle for one empty AtlasV3 block, with every
+    /// reference value computed by the lib's own commitment functions.
+    pub(crate) fn empty_block_bundle() -> StateDumpBundle {
         use zksync_os_zisk_lib::{block_header, commitment};
 
         let hex = |b: &[u8]| alloy_primitives::hex::encode(b);
@@ -1253,7 +1251,14 @@ mod tests {
             pi = hex(pi.as_slice()),
         );
 
-        let d: StateDumpBundle = serde_json::from_str(&json).expect("parse");
+        serde_json::from_str(&json).expect("parse")
+    }
+
+    /// Full-pipeline plumbing check: the self-consistent empty-block bundle
+    /// must build and pass every validation check.
+    #[test]
+    fn empty_block_bundle_builds_and_validates() {
+        let d = empty_block_bundle();
         let conversion = build_batch_input(&d, HeaderHashCheck::Armed);
         assert_eq!(conversion.batch_input.version, BATCH_INPUT_VERSION);
         assert!(
