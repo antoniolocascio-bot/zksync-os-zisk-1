@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use zksync_os_zisk_test_utils::native_check::{AxisComparison, NativeCheck, Stage};
-use zksync_os_zisk_test_utils::ConversionStats;
+use zksync_os_zisk_test_utils::{ConversionStats, WitnessSoundness};
 
 pub const EXIT_MATCH: i32 = 0;
 pub const EXIT_DIVERGENCE: i32 = 1;
@@ -13,6 +13,9 @@ pub const EXIT_ERROR: i32 = 2;
 pub enum Status {
     Match,
     Divergence,
+    /// A witness oracle the guest accepted with a different commitment: two
+    /// witnesses for one statement.
+    Finding,
     Error,
 }
 
@@ -20,7 +23,7 @@ impl Status {
     pub fn exit_code(self) -> i32 {
         match self {
             Status::Match => EXIT_MATCH,
-            Status::Divergence => EXIT_DIVERGENCE,
+            Status::Divergence | Status::Finding => EXIT_DIVERGENCE,
             Status::Error => EXIT_ERROR,
         }
     }
@@ -137,6 +140,10 @@ pub struct Report {
     pub steps: Vec<StepResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub divergence: Option<Divergence>,
+    /// The witness oracles run over this case, when `--witness-soundness`
+    /// asked for them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness_soundness: Option<WitnessSoundness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -191,6 +198,17 @@ impl Report {
         if !self.skipped_axes.is_empty() {
             println!("  not compared     {}", self.skipped_axes.join(", "));
         }
+        if let Some(sweep) = &self.witness_soundness {
+            // The digest sits above the verdicts it belongs to: a reader can
+            // see that every run below proved a statement about the same thing.
+            println!(
+                "  witness oracles  statement {}, honest commitment {}",
+                sweep.honest.statement, sweep.honest.commitment
+            );
+            for oracle in &sweep.oracles {
+                println!("    {:<24} {}", oracle.oracle, oracle.verdict);
+            }
+        }
         println!("  elapsed          {} ms", self.duration_ms);
         println!();
         match (&self.divergence, &self.error) {
@@ -207,10 +225,21 @@ impl Report {
                 println!("  {}", divergence.detail);
             }
             (None, Some(error)) => println!("ERROR\n  {error}"),
-            (None, None) => println!(
-                "MATCH — the guest reproduced every native reference value ({} axes)",
-                self.axes.len()
-            ),
+            (None, None) => match self
+                .witness_soundness
+                .as_ref()
+                .and_then(WitnessSoundness::finding)
+            {
+                Some(finding) => {
+                    println!("WITNESS-SOUNDNESS FINDING");
+                    println!("  oracle {}", finding.oracle);
+                    println!("  {}", finding.verdict);
+                }
+                None => println!(
+                    "MATCH — the guest reproduced every native reference value ({} axes)",
+                    self.axes.len()
+                ),
+            },
         }
     }
 }

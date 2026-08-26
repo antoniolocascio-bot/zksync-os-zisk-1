@@ -12,7 +12,7 @@ use rig::chain::RunConfig;
 use rig::TestingFramework;
 use zksync_os_tests_common::zksync_tx::ZKsyncTxEnvelope;
 use zksync_os_zisk_test_utils::{
-    build_batch_input, check_against_native, ConversionStats, HeaderHashCheck, NativeCheck,
+    build_batch_input, check_against_native, Conversion, HeaderHashCheck, NativeCheck,
     StateDumpBundle,
 };
 
@@ -32,7 +32,7 @@ pub struct ScenarioOutcome {
     pub block: BlockSummary,
     pub steps: Vec<StepResult>,
     pub check: NativeCheck,
-    pub witness: ConversionStats,
+    pub conversion: Conversion,
 }
 
 /// Run the guest over a state dump and compare it against the native
@@ -41,7 +41,7 @@ pub struct ScenarioOutcome {
 /// The conversion asserts the dump is self-consistent, and those assertions
 /// are its rejection mechanism, so a panic here means the dump is malformed
 /// rather than that the two engines disagree.
-pub fn check_bundle(bundle: &StateDumpBundle) -> anyhow::Result<(NativeCheck, ConversionStats)> {
+pub fn check_bundle(bundle: &StateDumpBundle) -> anyhow::Result<(NativeCheck, Conversion)> {
     let conversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         build_batch_input(bundle, HeaderHashCheck::Armed)
     }))
@@ -52,7 +52,7 @@ pub fn check_bundle(bundle: &StateDumpBundle) -> anyhow::Result<(NativeCheck, Co
         )
     })?;
     let check = check_against_native(bundle, &conversion.batch_input);
-    Ok((check, conversion.stats))
+    Ok((check, conversion))
 }
 
 pub fn run_scenario(
@@ -152,7 +152,7 @@ pub fn run_scenario(
     }
 
     let bundle = harvester.take(block_number)?;
-    let (check, witness) = check_bundle(&bundle)?;
+    let (check, conversion) = check_bundle(&bundle)?;
 
     Ok(ScenarioOutcome {
         block: BlockSummary {
@@ -161,7 +161,7 @@ pub fn run_scenario(
         },
         steps,
         check,
-        witness,
+        conversion,
     })
 }
 

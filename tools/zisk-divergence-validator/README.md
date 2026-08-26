@@ -37,6 +37,9 @@ cargo build --release
 
 # Replay a state dump captured from a native run
 ./target/release/zisk-divergence-validator --dump path/to/dump.json
+
+# Also ask whether the guest verifies the witness of this case
+./target/release/zisk-divergence-validator examples/simple_storage.yaml --witness-soundness
 ```
 
 The crate is its own workspace, so run cargo from this directory.
@@ -48,8 +51,8 @@ Scenario files are YAML (`.yaml`/`.yml`) or JSON (`.json`).
 | Code | Meaning |
 |------|---------|
 | 0 | Match — the guest reproduced every native reference value |
-| 1 | Divergence found |
-| 2 | Error (bad input, conversion failure, self-check failure) |
+| 1 | Divergence found, or a witness-soundness finding |
+| 2 | Error (bad input, conversion failure, self-check failure, harness error) |
 
 ## Scenario format
 
@@ -149,6 +152,48 @@ guest's message. A value that differs is reported as a commitment divergence,
 with the axis, the guest's value and the native value. The distinction tells
 the operator whether the two implementations executed the block differently or
 encoded the same execution differently.
+
+## Witness soundness
+
+`--witness-soundness` asks the other question about the same case: does the
+guest verify its witness, or only execute it? Every proof an honest run
+supplies is valid, so a guest that skips a check still reports a match.
+
+The tool runs each registered witness oracle over the batch it just executed.
+An oracle supplies the witness it wants the guest to accept. The rule a correct
+guest obeys:
+
+> For a mutation of the verified part of the witness, with the statement held
+> fixed, the guest either rejects the witness, or commits the same public input
+> as the honest run.
+
+A finding is therefore an accepted witness AND a different commitment: two
+witnesses for one statement.
+
+The statement is what the proof is about — the chain, the state transition
+function tier, the pre-state, the chain configuration, and the blocks with
+their transactions. The harness projects those fields to a digest and requires
+every oracle to preserve it. An oracle that moves the digest asks for a proof
+of something else, so the run reports a harness error, names that oracle, and
+exits 2 rather than judging the guest. Each report prints the digest above the
+verdicts it belongs to.
+
+Two oracles ship. `honest` is the identity, and its verdict pins the harness
+itself. `unbound_l2_to_l1_logs` appends a fabricated L2→L1 log record to the
+witness; the guest folds its own journal-derived log set into the commitment
+and never reads that field, so its verdict shows that the harness separates
+unbound data from bound data.
+
+```
+  witness oracles  statement 0x8c7b6f93…, honest commitment 0x1179334c…
+    honest                   accepted, identical commitment
+    unbound_l2_to_l1_logs    accepted, identical commitment
+```
+
+The oracles live in `tools/test-utils`, beside the conversion and the native
+cross-check, so one set serves this tool and a corpus sweep. A new case is one
+implementation of `WitnessOracle` and one line in `witness_oracle::oracles()`.
+`docs/witness-soundness-testing.md` holds the design.
 
 ## Self-check
 
