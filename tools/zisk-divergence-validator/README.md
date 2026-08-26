@@ -180,9 +180,16 @@ verdicts it belongs to.
 
 Two oracles ship. `honest` is the identity, and its verdict pins the harness
 itself. `unbound_l2_to_l1_logs` appends a fabricated L2→L1 log record to the
-witness; the guest folds its own journal-derived log set into the commitment
-and never reads that field, so its verdict shows that the harness separates
-unbound data from bound data.
+witness.
+
+That second one earns its place twice over. It shows that the harness separates
+unbound data from bound data, rather than reporting every change as a finding.
+It also guards a soundness property of the guest. L2→L1 logs carry withdrawals,
+so the value they commit to is critical — and the guest binds the set it derives
+itself from the REVM journal, never the copy the server supplies. A change that
+made the guest read the server's copy would move a critical value onto
+server-supplied data, and this oracle turns that verdict from
+`accepted, identical commitment` into a finding.
 
 ```
   witness oracles  statement 0x8c7b6f93…, honest commitment 0x1179334c…

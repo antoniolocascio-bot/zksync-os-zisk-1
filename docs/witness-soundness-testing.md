@@ -19,10 +19,17 @@ validator measures the first. This framework measures the second.
 
 The tempting rule is "the guest must reject a tampered witness". That rule is
 wrong, and it reports findings that are not defects. Parts of the witness bind
-nothing. `BlockInput::l2_to_l1_logs` says so in its own doc comment: the guest
-derives its log set from the REVM journal, so the field authenticates nothing.
-A correct guest accepts a mutation there, and a harness built on the tempting
-rule calls that a soundness bug.
+nothing. `BlockInput::l2_to_l1_logs` is the clearest case: the guest derives its
+own log set from the REVM journal and commits that, and it never reads the copy
+the server supplies. A correct guest accepts a change there, and a harness built
+on the tempting rule calls that a soundness bug.
+
+Unbound is not the same as unimportant. L2→L1 logs carry withdrawals, so what
+the guest commits about them is critical. The field is inert **because** the
+guest derives the value itself rather than trusting the server — which is the
+second-prover rule, not an oversight. An oracle over an inert field therefore
+does double duty: it proves the harness can tell inert from bound, and it fails
+the day someone binds a critical value to server-supplied data.
 
 The rule that holds:
 

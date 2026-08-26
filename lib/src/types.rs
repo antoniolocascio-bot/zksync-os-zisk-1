@@ -225,8 +225,8 @@ pub struct BlockInput {
     ///
     /// Witness data the commitment path does not read: the guest derives its own
     /// L2→L1 log set from the REVM journal and folds that into the logs merkle
-    /// tree (`executor::evm`). Comparing two guest-derived sets authenticates
-    /// nothing, so this field is retained for the server's own use only.
+    /// tree (`executor::evm`). Binding the commitment to this server-supplied
+    /// copy instead would defeat that, so the field serves the server alone.
     pub l2_to_l1_logs: Vec<L2ToL1LogEntry>,
     /// Per-block tree root that this block's merkle proofs were extracted from.
     /// For the first block in a batch this equals batch_meta.tree_root_before.
