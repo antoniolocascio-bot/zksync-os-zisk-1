@@ -11,7 +11,9 @@ the first value they disagree on. One case takes milliseconds. The tool
 generates no proof.
 
 Use it to triage an incident: write the reported scenario, run the tool, and
-read whether the guest reproduces native ZKsync OS.
+read whether the guest reproduces native ZKsync OS. Its exit codes and JSON
+report also make it the oracle for an automated search that generates scenarios
+and iterates; see "Driving it from an automated search".
 
 ## Prerequisites
 
@@ -205,6 +207,49 @@ The oracles live in `tools/test-utils`, beside the conversion and the native
 cross-check, so one set serves this tool and a corpus sweep. A new case is one
 implementation of `WitnessOracle` and one line in `witness_oracle::oracles()`.
 `docs/witness-soundness-testing.md` holds the design.
+
+## Driving it from an automated search
+
+The tool is built to be the oracle in an automated loop: a scenario goes in, an
+exit code and a JSON report come out, and a bytecode scenario takes about 6 ms,
+so one core answers on the order of 160 cases a second. The first mismatching
+axis gives a generator something to steer on, rather than a yes or no.
+
+The self-check earns its keep here more than anywhere. A campaign that collected
+findings from a subtly mis-built guest would poison every result it produced, and
+the operator would only learn that after triaging them. Refusing to report beats
+reporting wrongly.
+
+Four things shape a loop around it.
+
+**Compilation dominates, not execution.** A Solidity scenario costs about 410 ms,
+almost all of it `forge build`, against 6 ms for one that carries bytecode. A
+search should emit bytecode directly and keep `forge` for the minimized
+reproducer at the end.
+
+**Gas divergence is invisible as such.** The guest receives the native
+per-transaction gas through `gas_used_override`, which the corpus lane
+established. A pure gas-accounting difference is therefore not an axis of its
+own; it surfaces only when it perturbs the block header hash. A clean sweep says
+nothing about that class.
+
+**Any exit outside 0, 1 and 2 is a finding to keep.** `catch_unwind` turns a
+guest panic into a verdict, but it does not catch `SIGABRT`, and this stack has
+an abort hazard of its own. A harness that retries on an unexpected exit throws
+away the most interesting cases.
+
+**The generator is the part that is missing.** This tool checks; it does not
+propose. The committed EEST corpus already covers 10,605 cases with 16 recorded
+non-matches, so a generator that wanders into that space spends its budget
+rediscovering waivers.
+
+Two limits to fix before a campaign rather than during one. A scenario run builds
+its signers with `PrivateKeySigner::random()`, so the transactions, the statement
+digest and the commitment differ on every run — a finding from the scenario path
+cannot be reproduced from a case identifier, while the `--dump` path can. And the
+self-check runs per invocation, which is 1 ms against a 6 ms case; a loop driving
+thousands wants a batch mode that checks once per process and then streams
+scenarios, which also removes the process-spawn cost.
 
 ## Self-check
 
