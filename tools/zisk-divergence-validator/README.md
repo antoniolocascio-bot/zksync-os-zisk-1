@@ -197,6 +197,10 @@ server-supplied data, and this oracle turns that verdict from
     unbound_l2_to_l1_logs    accepted, identical commitment
 ```
 
+`examples/witness-soundness/README.md` walks the framework end to end: it writes
+an adversary, deletes a real binding from the guest, and records what the tool
+answered at each step. It doubles as a map of the guest's witness bindings.
+
 The oracles live in `tools/test-utils`, beside the conversion and the native
 cross-check, so one set serves this tool and a corpus sweep. A new case is one
 implementation of `WitnessOracle` and one line in `witness_oracle::oracles()`.
