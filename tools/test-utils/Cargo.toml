@@ -5,9 +5,11 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Test utilities for the ZiSK lane, kept out of the shippable crates:
-# dump_to_batchinput feeds the EEST corpus lane (tools/corpus-emu.sh) and
-# run_batch_input replays a captured BatchInput for divergence debugging.
+# Test utilities for the ZiSK lane, kept out of the shippable crates. The
+# library holds the state-dump conversion and the native cross-check, which
+# dump_to_batchinput (the EEST corpus lane, tools/corpus-emu.sh) and
+# tools/zisk-divergence-validator both call. run_batch_input replays a
+# captured BatchInput for divergence debugging.
 
 [dependencies]
 zksync-os-zisk-lib = { path = "../../lib" }
@@ -15,6 +17,6 @@ zksync-os-revm = { git = "https://github.com/matter-labs/zksync-os-revm", tag = 
 revm = { version = "=42.0.1", default-features = false, features = ["std", "optional_balance_check", "serde", "tracer"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-alloy-primitives = { version = "1", default-features = false }
+alloy-primitives = { version = "1", default-features = false, features = ["serde"] }
 anyhow = "1"
 sha2 = "0.10"

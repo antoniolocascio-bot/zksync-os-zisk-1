@@ -86,6 +86,11 @@ bundle ──▶ dump_to_batchinput (tools/test-utils/, this repo)
 input.bin ──▶ ziskemu + guest ELF ──▶ clean exit or attributed panic
 ```
 
+The bundle-to-`BatchInput` conversion and the native cross-check live in the
+`tools/test-utils` crate library. `dump_to_batchinput` is a thin binary over
+it, and `tools/zisk-divergence-validator` calls the same code on scenarios it
+runs through the rig itself, so both lanes report on one comparison.
+
 ## From-scratch setup
 
 1. **zksync-os checkout** — create a clean dedicated worktree at the official

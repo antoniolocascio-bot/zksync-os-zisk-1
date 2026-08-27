@@ -155,9 +155,9 @@ pub(super) fn execute_block_proven(
     // L2->L1 logs are computed from REVM's execution output (the L1Messenger
     // precompile at 0x8008 emits L1MessageSent events, reconstructed into
     // L2ToL1LogEntry), and it is those COMPUTED logs that feed the batch
-    // commitment. The witness `block.l2_to_l1_logs` is not read here: comparing
-    // it against the computed set authenticates nothing (both are guest-derived,
-    // and the commitment ignores the witness copy).
+    // commitment. The witness `block.l2_to_l1_logs` is the server's copy and is
+    // not read here: binding a security-critical value to server-supplied data
+    // is what deriving it in-guest exists to avoid.
 
     (
         BlockResult {
