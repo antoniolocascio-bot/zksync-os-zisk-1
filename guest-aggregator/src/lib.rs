@@ -16,7 +16,7 @@
 //!
 //! The unit of input is the byte stream `cargo-zisk` clients obtain from
 //! `zisk_common::Proof::get_proof_bytes()` for a **non-minimal
-//! `vadcop_final`** proof (ZiSK v0.18.0):
+//! `vadcop_final`** proof:
 //!
 //! ```text
 //! [minimal(1)][n_publics=68(1)][program_vk(4)][publics(64)]
@@ -705,7 +705,7 @@ mod tests {
     }
 
     /// THE cross-stack binding vector, computed from the real 4-batch
-    /// aggregation session (ZiSK v0.18.0). `BINDING_VECTOR.md` next to
+    /// aggregation session. `BINDING_VECTOR.md` next to
     /// this package records the same values; the server and L1-contract
     /// workstreams pin them verbatim. Update all of them together — they
     /// must never diverge.

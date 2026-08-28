@@ -5,6 +5,11 @@
 # identical to the prover daemon's public-values prefix and the server's
 # `prover_api.zisk_vks[].program_vk` expectation.
 #
+# STALE: this value belongs to the ZiSK 0.18.0 guest from release 0.0.5.
+# The rebased ZiSK 1.2.0-alpha guest must be rebuilt and its ELF digest
+# recorded before `Rotate program VK pins` derives the replacement.
+# Workflows reading this record fail closed until the rotation completes.
+#
 # Derived with cargo-zisk 0.18.0 on 2026-09-04 by
 # https://github.com/matter-labs/zksync-os-zisk/actions/runs/33883757966
 # from the reproducible container ELF with sha256

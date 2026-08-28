@@ -3,11 +3,11 @@
 //! Two backends share one pipeline, selected by [`ProvingBackend`]:
 //! - [`ProvingBackend::Spawn`] (the default) runs one `cargo-zisk` process
 //!   per proof. The process loads the proving keys and initializes the GPU
-//!   on every invocation. ZiSK v0.18.0 supports this backend.
+//!   on every invocation.
 //! - [`ProvingBackend::Coordinator`] shells `zisk-prove-client` calls
 //!   against a resident `zisk-coordinator`, whose `zisk-worker` keeps the
 //!   keys and the GPU loaded for the service lifetime; the client binary
-//!   ships in the ZiSK v0.18.0 source tree.
+//!   ships in the ZiSK source tree.
 //!
 //! Startup runs a one-time setup per guest ELF. It must run before the first
 //! proof for that ELF.
@@ -574,6 +574,10 @@ enum ZiskProofBody {
     },
     Plonk {
         proof_bytes: Vec<u8>,
+        // The wrap key and the u32 publics view are decoded only to advance
+        // the deserializer; the wire values come from `publics_full` and
+        // `rootc`.
+        #[allow(dead_code)]
         plonk_vk: Box<ZiskPlonkVkBlob>,
         #[allow(dead_code)]
         publics: ZiskPublicValues,
@@ -606,9 +610,9 @@ enum ZiskHashMode {
 
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct ZiskPlonkVkBlob {
     vadcop_vk: Vec<u64>,
-    #[allow(dead_code)]
     plonk_vkey: ZiskPlonkVkey,
 }
 
@@ -639,6 +643,7 @@ struct ZiskPlonkVkey {
 /// absent from the bincode stream, so only `data` is mirrored.
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct ZiskPublicValues {
     data: Vec<u8>,
 }

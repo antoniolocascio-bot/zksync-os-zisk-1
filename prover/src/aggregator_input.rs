@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(loaded, stream);
     }
 
-    /// A real cargo-zisk v0.18.0 vadcop_final specimen (batch 1 of the
+    /// A real cargo-zisk vadcop_final specimen (batch 1 of the
     /// binding-vector range) must load unchanged — the regression anchor
     /// for the stream framing accepted by the in-guest verifier.
     #[test]
