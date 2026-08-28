@@ -43,7 +43,7 @@ fn main() {
     // read, so the siblings are never all resident. The wire format is the same
     // for both paths and the commitment is byte-identical. See
     // `executor::stream`.
-    let bytes = ziskos::io::read_input_slice();
+    let bytes = ziskos::io::read_slice();
     let (_output, commitment) = executor::execute_and_commit_streaming(bytes)
         .expect("failed to deserialize/execute BatchInput (streaming, bincode 2.x)");
     let hash_bytes: [u8; 32] = commitment.into();

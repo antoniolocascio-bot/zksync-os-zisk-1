@@ -1,4 +1,4 @@
-//! Binding-vector checks over REAL `cargo-zisk` (ZiSK v0.18.0)
+//! Binding-vector checks over REAL `cargo-zisk` (ZiSK v1.2.0-alpha)
 //! `vadcop_final` proofs: load the proof files, parse them with the
 //! guest's own frame parser, run the `Aggregator` (the exact code path the
 //! guest executes, host keccak backend), and assert the values pinned in
