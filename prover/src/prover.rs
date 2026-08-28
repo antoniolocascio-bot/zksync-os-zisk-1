@@ -870,7 +870,9 @@ mod tests {
                     vadcop_vk: rootc.clone(),
                     plonk_vkey: sample_vkey(),
                 }),
-                publics: ZiskPublicValues { data: vec![0u8; 256] },
+                publics: ZiskPublicValues {
+                    data: vec![0u8; 256],
+                },
                 publics_full: publics_full.clone(),
                 rootc: rootc.clone(),
             },
@@ -901,9 +903,11 @@ mod tests {
             &out.public_values[32..40],
             0x4242_4242_4242_4242u64.to_le_bytes().as_slice()
         );
-        assert!(out.public_values[32..544]
-            .chunks_exact(8)
-            .all(|c| c == 0x4242_4242_4242_4242u64.to_le_bytes()));
+        assert!(
+            out.public_values[32..544]
+                .chunks_exact(8)
+                .all(|c| c == 0x4242_4242_4242_4242u64.to_le_bytes())
+        );
         assert_eq!(
             &out.public_values[544..552],
             0xaaaa_bbbb_cccc_ddddu64.to_be_bytes().as_slice()
@@ -955,10 +959,8 @@ mod tests {
         assert_eq!(frame.program_vk(), program_vk.as_slice());
         assert_eq!(frame.vadcop_vk(), zisk_vk.as_slice());
         assert_eq!(frame.commitment(), [0x11u8; 32]);
-        let body_start = agg::HEADER_WORDS
-            + agg::LEAF_FLAG_WORDS
-            + agg::PROGRAM_VK_WORDS
-            + agg::PUBLICS_WORDS;
+        let body_start =
+            agg::HEADER_WORDS + agg::LEAF_FLAG_WORDS + agg::PROGRAM_VK_WORDS + agg::PUBLICS_WORDS;
         assert_eq!(
             &words[body_start..body_start + agg::VADCOP_FINAL_BODY_WORDS],
             body.as_slice()

@@ -1,7 +1,7 @@
 # Aggregated-Range Binding Vector
 
 Cross-stack test vector for the aggregator guest's committed output — the
-32 bytes at `publics[32..64]` of an aggregated range proof. Three
+32 bytes at `publics[32..96]` of an aggregated range proof. Three
 codebases pin these exact values and must stay in lockstep:
 
 - this guest (`cross_stack_binding_vector` in `src/lib.rs` and the

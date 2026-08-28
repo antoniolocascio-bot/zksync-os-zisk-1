@@ -70,7 +70,7 @@ record it in `guest/GUEST_PROGRAM_VK` or
 `guest-aggregator/GUEST_PROGRAM_VK`:
 
 ```bash
-cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+cargo-zisk setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 ```
 
 The manually dispatched `Rotate program VK pins` workflow performs that
@@ -131,8 +131,8 @@ cd lib && cargo test print_input_bin_commitment -- --ignored
 ziskemu -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin
 
 # Execute it through the full proving pipeline, without a proof
-cargo-zisk execute -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
-    --emulator -k ~/.zisk/provingKey
+cargo-zisk-dev execute -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
+    -k ~/.zisk/provingKey
 
 # Replay the committed EEST native-reference corpus (the pull-request gate)
 cargo build --release --manifest-path tools/test-utils/Cargo.toml \
@@ -142,14 +142,14 @@ tools/run-eest-native.py \
     --output /tmp/zisk-eest-native
 
 # Prove one batch end to end (needs a GPU and both proving keys)
-cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey -g
+cargo-zisk setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 cargo-zisk prove -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
     -k ~/.zisk/provingKey -w ~/.zisk/provingKeySnark --plonk \
-    -y -o /tmp/proof.bin -g --emulator
+    -y -o /tmp/proof.bin -g
 ```
 
-The ASM emulator is faster and needs a high memlock ulimit. Pass
-`--emulator` to select the standard emulator, which runs anywhere.
+The standard emulator runs anywhere and is the default. `-a` selects the ASM
+emulator, which is faster and needs a high memlock ulimit.
 
 Server integration test (it fetches the server-assembled `BatchInput` from
 `/ZiSK/{batch}/peek` and re-executes it with this lib's executor, so it

@@ -283,7 +283,8 @@ mod tests {
         "1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468";
     const SAMPLE_COMMITMENT: &str =
         "6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea";
-    const SAMPLE_VADCOP_VK: &str = "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
+    const SAMPLE_VADCOP_VK: &str =
+        "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 
     #[test]
     fn verify_plonk_accepts_well_shaped_artifact() {
