@@ -8,7 +8,7 @@
 # STALE: this value belongs to the ZiSK 0.18.0 toolchain and the guest ELF
 # with sha256 ac5b351ee31b3929fb9cb5a63ed3dfbff6609b3af04f1f3d0febfacc12d1c1f3.
 # The ZiSK 1.2.0-alpha guest ELF is
-# 2fd74f95c96f3e0fb47bf04c625786eff557e28e764e06b72bcd0c6ae9b9c050. Dispatch
+# dc68bd954fb3e2b79635c06bbc4775318d33c6273f3d45adb237f7730f352128. Dispatch
 # `Rotate program VK pins` against this branch to derive the new value; every
 # workflow that reads this record fails closed until then.
 #
