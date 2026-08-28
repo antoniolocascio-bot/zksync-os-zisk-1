@@ -101,7 +101,7 @@ def render_binding_vector(values: dict) -> str:
         f"commitment_{index} = {value}" for index, value in enumerate(commitments, 1)
     )
     preimage = " ‖ ".join(f"commitment_{index}" for index in range(1, len(commitments) + 1))
-    return f"""## Inputs (real 4-batch aggregation session, ZiSK v0.18.0, {date})
+    return f"""## Inputs (real 4-batch aggregation session, ZiSK v1.2.0-alpha, {date})
 
 This vector was produced by [fixture-session run]({run_url}) from
 `{metadata['selected_ref']}` at `{metadata['selected_sha']}`. The inputs are
@@ -157,7 +157,7 @@ digest           = {values['binding_digest']}
 ```
 
 The real aggregated proof of this range commits the same digest: the
-PLONK-wrapped aggregate has wire public-values bytes `[32..64]` equal to
+PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
 `digest`, bytes `[0..32]` equal to the aggregator programVK
 `{metadata['aggregator_program_vk']}`, and bytes `[288..320]` equal to
 `rootCVadcopFinal`.
