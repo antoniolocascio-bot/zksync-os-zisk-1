@@ -238,7 +238,7 @@ mod tests {
     fn verifies_the_real_vadcop_final_proof_file() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
+            "/../prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
         );
         let bytes = std::fs::read(path).expect("read committed vadcop_final fixture");
         assert_eq!(verify_vadcop_final_proof_file(&bytes), Ok(()));

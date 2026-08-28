@@ -232,7 +232,7 @@ so the cross-proof binding is inherent.
 A `programVK` is the ROM merkle root of a guest ELF. It covers the ROM image
 only, so two ELFs that differ outside the ROM image share it. Derive one on
 a prover box with
-`cargo-zisk program-setup -e <elf> -k ~/.zisk/provingKey`.
+`cargo-zisk setup -e <elf> -k ~/.zisk/provingKey`.
 
 Four values identify the lane, and each is pinned at least twice so drift
 is caught at the layer that notices first:

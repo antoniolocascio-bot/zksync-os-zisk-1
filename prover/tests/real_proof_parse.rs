@@ -22,7 +22,7 @@ fn hex(b: &[u8]) -> String {
 fn parses_real_v0_18_proof_file() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/real_proof_zisk_v0.18.0.bin"
+        "/tests/data/real_proof_zisk_v1.2.0-alpha.bin"
     );
     let out = parse_proof_file(std::path::Path::new(path)).expect("parse real proof file");
 
