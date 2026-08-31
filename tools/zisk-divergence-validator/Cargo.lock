@@ -8449,17 +8449,6 @@ dependencies = [
 [[package]]
 name = "zksync-os-revm"
 version = "0.1.0"
-source = "git+https://github.com/matter-labs/zksync-os-revm?tag=v0.2.0#f4ed208451d2d67b2fc1d1db3b5d22ee66196d65"
-dependencies = [
- "auto_impl",
- "revm",
- "serde",
-]
-
-[[package]]
-name = "zksync-os-revm"
-version = "0.1.0"
-source = "git+https://github.com/matter-labs/zksync-os-revm?tag=v0.3.0#32872310b862e98bfa00a2f7c7ac701b83621066"
 dependencies = [
  "auto_impl",
  "revm",
@@ -8479,7 +8468,7 @@ dependencies = [
  "revm",
  "serde",
  "tiny-keccak",
- "zksync-os-revm 0.1.0 (git+https://github.com/matter-labs/zksync-os-revm?tag=v0.3.0)",
+ "zksync-os-revm",
 ]
 
 [[package]]
@@ -8492,7 +8481,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "zksync-os-revm 0.1.0 (git+https://github.com/matter-labs/zksync-os-revm?tag=v0.3.0)",
+ "zksync-os-revm",
  "zksync-os-zisk-lib",
 ]
 
@@ -8545,7 +8534,7 @@ dependencies = [
  "revm-inspectors",
  "ruint",
  "zk_ee",
- "zksync-os-revm 0.1.0 (git+https://github.com/matter-labs/zksync-os-revm?tag=v0.2.0)",
+ "zksync-os-revm",
  "zksync_os_api",
  "zksync_os_interface",
  "zksync_os_tests_common",
