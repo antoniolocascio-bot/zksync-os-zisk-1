@@ -709,13 +709,26 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
         "rootC has {} words, expected {PROGRAM_VK_LEN}",
         rootc.len()
     );
-    // `publics_full` is the flag-free `[program VK | inputs]` view; the guest
-    // publics the circuit hashes are the inputs half.
+    // Plonk files can retain the recursion-layer flag that Vadcop files
+    // normalize away. Match upstream snark_publics_hash before slicing inputs.
+    let publics_full = match publics_full.as_slice() {
+        [0 | 1, program_publics @ ..]
+            if program_publics.len() == PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS =>
+        {
+            program_publics
+        }
+        program_publics => program_publics,
+    };
     anyhow::ensure!(
         publics_full.len() == PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS,
         "publics_full has {} words, expected {}",
         publics_full.len(),
         PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS
+    );
+
+    anyhow::ensure!(
+        publics_full[..PROGRAM_VK_LEN] == proof_file.program_vk.vk,
+        "publics_full program VK differs from the proof file's program VK"
     );
 
     let mut public_values = Vec::with_capacity(ZISK_PUBLIC_VALUES_BYTES);
@@ -860,6 +873,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_real_alpha_plonk_files_with_recursion_flag() {
+        for (file, program_vk) in [
+            (
+                "real_proof_zisk_v1.2.0-alpha.bin",
+                "189d6b11c50ef1db9885fed376479ed97dde719a59574a7946d8d612e25da97a",
+            ),
+            (
+                "real_plonk_aggregate_zisk_v1.2.0-alpha.bin",
+                "10f0e91f54ad66e4e95713a1b4b9fda44ea3b06e51ed3430ef775ba8bef4a7c8",
+            ),
+        ] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/data")
+                .join(file);
+            let output = parse_proof_file(&path).unwrap();
+            assert_eq!(output.proof.len(), ZISK_SNARK_PROOF_BYTES);
+            assert_eq!(output.public_values.len(), ZISK_PUBLIC_VALUES_BYTES);
+            assert_eq!(
+                output.public_values[..32]
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+                program_vk
+            );
+            let bytes = std::fs::read(&path).unwrap();
+            let (proof, _): (ZiskProofFile, usize) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+            let ZiskProofBody::Plonk { publics_full, .. } = &proof.body else {
+                panic!("expected Plonk")
+            };
+            assert_eq!(publics_full.len(), 1 + PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS);
+            assert_eq!(publics_full[0], 1);
+        }
+    }
+
+    #[test]
     fn parse_proof_file_roundtrip() {
         let program_vk = vec![0x1111_2222_3333_4444u64; PROGRAM_VK_LEN];
         let rootc = vec![0xaaaa_bbbb_cccc_ddddu64; PROGRAM_VK_LEN];
@@ -908,11 +957,9 @@ mod tests {
             &out.public_values[32..40],
             0x4242_4242_4242_4242u64.to_le_bytes().as_slice()
         );
-        assert!(
-            out.public_values[32..544]
-                .chunks_exact(8)
-                .all(|c| c == 0x4242_4242_4242_4242u64.to_le_bytes())
-        );
+        assert!(out.public_values[32..544]
+            .chunks_exact(8)
+            .all(|c| c == 0x4242_4242_4242_4242u64.to_le_bytes()));
         assert_eq!(
             &out.public_values[544..552],
             0xaaaa_bbbb_cccc_ddddu64.to_be_bytes().as_slice()

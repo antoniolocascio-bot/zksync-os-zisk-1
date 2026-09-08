@@ -12,10 +12,10 @@
 use zksync_os_zisk_prover_service::prover::parse_proof_file;
 
 const EXPECTED_PROGRAM_VK: &str =
-    "1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468";
+    "189d6b11c50ef1db9885fed376479ed97dde719a59574a7946d8d612e25da97a";
 const EXPECTED_COMMITMENT: &str =
-    "6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea";
-const EXPECTED_VADCOP_VK: &str = "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
+    "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd";
+const EXPECTED_VADCOP_VK: &str = "564c2b1bcbd5932c81cfad1fa786a98372eb3d6495257c2d944544334f84382f";
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
