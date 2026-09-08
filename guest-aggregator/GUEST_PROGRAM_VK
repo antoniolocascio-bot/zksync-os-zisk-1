@@ -12,6 +12,9 @@
 # c6c591234675f4d08a1edce83d60d64ffe6d69d96da943eb509c28ac8b0b878c:
 #   cargo-zisk setup -e out/zksync-os-zisk-guest-aggregator -k ~/.zisk/provingKey
 #
+# Unused symbols stripped; load segments unchanged. Stripped ELF sha256:
+# 562816295d64258ce4a57a8efe1e109e5161ff4cd8bf941977ad1e8ab64b412f
+#
 # Root hash limbs: [1220731819791312612, 16813929319053786532,
 #                   5666566744029606960, 17255361277609682888]
 0x10f0e91f54ad66e4e95713a1b4b9fda44ea3b06e51ed3430ef775ba8bef4a7c8

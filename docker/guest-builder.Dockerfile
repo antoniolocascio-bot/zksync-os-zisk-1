@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates xz-utils \
         build-essential git pkg-config libssl-dev \
         openmpi-bin libopenmpi-dev libsodium23 libgmp10 libomp5-18 \
-        clang libclang-dev \
+        clang libclang-dev llvm-18 \
     && rm -rf /var/lib/apt/lists/*
 
 # The `zisk` toolchain installed below provides rustc but no cargo. Rustup's
@@ -67,11 +67,14 @@ WORKDIR /build
 COPY lib /build/lib
 COPY guest /build/guest
 
+# LLVM may vary private symbol suffixes between identical builds. Strip
+# non-loaded symbols so they cannot change the published ELF hash.
 RUN cd /build/guest \
     && cargo-zisk build --release \
     && ELF="$(find target -type f -name zksync-os-zisk-guest -path '*/release/*' | head -1)" \
     && test -n "$ELF" \
     && nm -C "$ELF" | grep -q 'ziskos::alloc::embedded_dlmalloc::DLMALLOC' \
+    && llvm-strip-18 --strip-all "$ELF" \
     && cp "$ELF" /build/zksync-os-zisk-guest \
     && sha256sum /build/zksync-os-zisk-guest
 
