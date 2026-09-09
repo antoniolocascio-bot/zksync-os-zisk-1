@@ -130,7 +130,7 @@ jobs:
 
   prove:
     name: prove, compare native/guest commitments, and aggregate
-    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
+    runs-on: [matterlabs-ci-gpu-runner]
     needs: prepare
     timeout-minutes: 240
     permissions:
@@ -141,8 +141,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # The GPU runner is a GKE pod that exposes the driver under /usr/local/nvidia.
       - name: Check Nvidia driver version
-        run: nvidia-smi
+        run: |
+          echo "/usr/local/nvidia/bin:/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/local/nvidia/bin:$PATH"
+          nvidia-smi
 
       - name: Download the immutable session bundle
         uses: actions/download-artifact@v4

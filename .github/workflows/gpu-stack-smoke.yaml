@@ -7,10 +7,12 @@ name: GPU stack smoke test
 # its commitment equals the native commitment, and the PLONK proof carries
 # the pinned inner programVK.
 #
-# Dispatch only: it downloads 26 GB of proving keys on first use (kept in a
-# host directory between runs) and needs a runner with Docker, the NVIDIA
-# container toolkit, and a GPU. The run fails fast with a clear message when
-# the runner lacks any of them.
+# Dispatch only. It runs on matterlabs-ci-gpu-runner, an ephemeral GKE pod
+# (Docker-in-Docker with the NVIDIA driver, one H100, A100 or L4). Every run
+# downloads the 26 GB of proving keys from Polygon's GCS bucket and rebuilds
+# the constant trees, because nothing persists between pods. The run fails
+# fast with a clear message when the runner lacks Docker, GPU containers, or
+# the 70 GB of free disk the keys need.
 
 on:
   workflow_dispatch:
@@ -23,9 +25,6 @@ on:
 concurrency:
   group: gpu-stack-smoke-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  KEYS_HOST_DIR: /var/lib/zisk-stack-keys
 
 jobs:
   prepare:
@@ -78,7 +77,7 @@ jobs:
 
   smoke:
     name: boot the stack and prove one batch through the coordinator
-    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
+    runs-on: [matterlabs-ci-gpu-runner]
     needs: prepare
     timeout-minutes: 240
     permissions:
@@ -92,7 +91,10 @@ jobs:
       - name: Check the runner can run GPU containers
         run: |
           set -euo pipefail
+          echo "/usr/local/nvidia/bin:/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/local/nvidia/bin:$PATH"
           nvidia-smi
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
           docker info >/dev/null || { echo "::error::Docker is not available on this runner"; exit 1; }
           docker compose version
           docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L \
@@ -113,15 +115,17 @@ jobs:
             --prover-bin out/zksync-os-zisk-prover-service --skip-guest-build \
             --registry local --tag smoke
 
-      # The keys persist in a host directory across runs; the compose override
-      # binds the named volume to it. No sequencer exists here, so the daemon
+      # The keys go to a directory on the runner's disk; the compose override
+      # binds the named volume to it so prepare-keys' free-space check and the
+      # worker see the same files. No sequencer exists here, so the daemon
       # service is never started (the override still needs its variables).
       - name: Write the compose environment and override
         env:
           ALLOW_UNPINNED: ${{ inputs.allow_unpinned_keys && '1' || '0' }}
         run: |
           set -euo pipefail
-          sudo mkdir -p "$KEYS_HOST_DIR"
+          KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
+          mkdir -p "$KEYS_HOST_DIR"
           cat > docker/zisk-stack/.env <<EOT
           ZISK_SEQUENCER_URL=http://unused.invalid:3124
           ZISK_STACK_IMAGE=local/zksync-os-zisk-prover:smoke
