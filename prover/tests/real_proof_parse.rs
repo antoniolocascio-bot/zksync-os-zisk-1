@@ -25,7 +25,7 @@ fn hex(b: &[u8]) -> String {
 /// eight-byte slot, so read them back out of the widened publics region.
 fn commitment(public_values: &[u8]) -> String {
     let mut out = Vec::with_capacity(32);
-    for word in public_values[32..96].chunks_exact(8) {
+    for word in public_values[32..96].as_chunks::<8>().0 {
         out.extend_from_slice(&word[..4]);
     }
     hex(&out)
@@ -53,7 +53,9 @@ fn parses_real_proof_file() {
     );
     assert!(
         out.public_values[32..96]
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .all(|w| w[4..] == [0u8; 4]),
         "each guest public is a u32 widened to a u64"
     );

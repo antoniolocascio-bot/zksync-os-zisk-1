@@ -260,7 +260,7 @@ mod tests {
         let mut pv = vec![0u8; PUBLIC_VALUES_BYTES];
         pv[PROGRAM_VK_RANGE].copy_from_slice(&unhex(program_vk));
         let commitment = unhex(commitment);
-        for (word, chunk) in commitment.chunks_exact(4).enumerate() {
+        for (word, chunk) in commitment.as_chunks::<4>().0.iter().enumerate() {
             let at = GUEST_PUBLICS_RANGE.start + word * 8;
             pv[at..at + 4].copy_from_slice(chunk);
         }

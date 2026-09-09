@@ -949,8 +949,10 @@ mod tests {
         );
         assert!(
             out.public_values[32..544]
-                .chunks_exact(8)
-                .all(|c| c == 0x4242_4242_4242_4242u64.to_le_bytes())
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .all(|c| *c == 0x4242_4242_4242_4242u64.to_le_bytes())
         );
         assert_eq!(
             &out.public_values[544..552],

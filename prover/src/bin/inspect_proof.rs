@@ -37,8 +37,10 @@ fn main() {
 fn commitment(public_values: &[u8]) -> [u8; 32] {
     let mut digest = [0; 32];
     for (chunk, slot) in digest
-        .chunks_exact_mut(4)
-        .zip(public_values[32..96].chunks_exact(8))
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(public_values[32..96].as_chunks::<8>().0)
     {
         assert_eq!(&slot[4..], &[0; 4], "non-canonical guest-public padding");
         chunk.copy_from_slice(&slot[..4]);
@@ -57,8 +59,10 @@ mod tests {
         let expected = std::array::from_fn::<_, 32, _>(|i| i as u8 + 1);
         let mut values = [0; 576];
         for (chunk, slot) in expected
-            .chunks_exact(4)
-            .zip(values[32..96].chunks_exact_mut(8))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(values[32..96].as_chunks_mut::<8>().0)
         {
             slot[..4].copy_from_slice(chunk);
         }
