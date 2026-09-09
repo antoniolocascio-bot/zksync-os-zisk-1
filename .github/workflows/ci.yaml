@@ -49,13 +49,14 @@ jobs:
       # proofman-verifier 1.2.0-alpha depends, unconditionally on x86_64, on
       # proofman-starks-lib-c, which compiles the pil2-stark C++ library while
       # cargo builds. These packages are that build's inputs (nasm for the
-      # bn128 assembly, nlohmann-json, gmp, sodium, OpenMP). rust-cache keeps
+      # bn128 assembly, nlohmann-json, gmp, sodium, OpenMP, MPI). rust-cache keeps
       # the compiled library across runs.
       - run: >
           sudo apt-get update && sudo apt-get install -y --no-install-recommends
           build-essential cmake nasm libgmp-dev nlohmann-json3-dev libsodium-dev
-          libomp-dev libssl-dev uuid-dev libsecp256k1-dev libpqxx-dev
-          libprotobuf-dev protobuf-compiler libgrpc++-dev
+          libomp-dev libopenmpi-dev openmpi-bin openmpi-common libssl-dev
+          uuid-dev libsecp256k1-dev libpqxx-dev libprotobuf-dev
+          protobuf-compiler libgrpc++-dev
       - run: cargo fmt --check
         working-directory: prover
       - run: cargo clippy --all-targets -- -D warnings
@@ -151,13 +152,14 @@ jobs:
       # proofman-verifier 1.2.0-alpha depends, unconditionally on x86_64, on
       # proofman-starks-lib-c, which compiles the pil2-stark C++ library while
       # cargo builds. These packages are that build's inputs (nasm for the
-      # bn128 assembly, nlohmann-json, gmp, sodium, OpenMP). rust-cache keeps
+      # bn128 assembly, nlohmann-json, gmp, sodium, OpenMP, MPI). rust-cache keeps
       # the compiled library across runs.
       - run: >
           sudo apt-get update && sudo apt-get install -y --no-install-recommends
           build-essential cmake nasm libgmp-dev nlohmann-json3-dev libsodium-dev
-          libomp-dev libssl-dev uuid-dev libsecp256k1-dev libpqxx-dev
-          libprotobuf-dev protobuf-compiler libgrpc++-dev
+          libomp-dev libopenmpi-dev openmpi-bin openmpi-common libssl-dev
+          uuid-dev libsecp256k1-dev libpqxx-dev libprotobuf-dev
+          protobuf-compiler libgrpc++-dev
       - run: cargo fmt --check
         working-directory: zisk-verifier
       - run: cargo clippy --all-targets --all-features -- -D warnings -A unexpected_cfgs
