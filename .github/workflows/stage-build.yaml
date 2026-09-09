@@ -95,7 +95,10 @@ jobs:
             -f docker/zisk-stack/Dockerfile --target prover-export -o out .
           ls -la out
 
+      # Pull requests only build. A fork's pull request carries no repository
+      # secrets, so every registry login is skipped there rather than failing.
       - name: Login to GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
@@ -104,6 +107,7 @@ jobs:
 
       # Pull-rate-limit relief only; the org credential has no push rights on Docker Hub.
       - name: Login to Docker Hub
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USER }}
@@ -111,6 +115,7 @@ jobs:
 
       # Ambient runner identity, no stored key; the self-hosted runners carry GCP credentials.
       - name: Login to Google Artifact Registry
+        if: ${{ github.event_name != 'pull_request' }}
         run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       # Quay only receives release images (numeric tags).
@@ -155,10 +160,14 @@ jobs:
           cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}:buildcache'
           cache-to: ${{ steps.set-cache-to.outputs.cache-to }}
 
+  # Runs only once the Dependency Track endpoint is configured for this
+  # repository (vars.DEPENDENCY_TRACK_SERVER_HOSTNAME, the parent project
+  # UUID variable, and the API key secret); until then it is skipped rather
+  # than failing every push to main.
   sbom-generation:
     name: SBOM
     needs: [setup, build-images]
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && vars.DEPENDENCY_TRACK_SERVER_HOSTNAME != ''
     permissions:
       contents: read
       packages: read
