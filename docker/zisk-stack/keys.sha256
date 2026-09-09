@@ -1,0 +1,18 @@
+# sha256 pins of the ZiSK proving-key tarballs that zisk-prepare-keys fetches
+# from https://storage.googleapis.com/zisk-setup for the pinned ZISK_VERSION.
+#
+# Polygon publishes only md5 sidecars for these tarballs (plus a .hash file
+# for the STARK key). The fetch step verifies the md5 sidecar AND the pin
+# below; a pin that reads PENDING is accepted only with
+# ZISK_KEYS_ALLOW_UNPINNED=1, in which case the step prints the digest it
+# observed so it can be recorded here and reviewed.
+#
+# Format: <sha256 or PENDING>  <tarball file name>
+
+# Source: the bucket's zisk-provingkey-1.2.0-alpha.hash sidecar, read on
+# 2026-09-08. Not yet confirmed against a download by this repository.
+8a3874e32de9f44e999ff91f06df618efe44ba0606a7c5c592e3fe59feb58e76  zisk-provingkey-1.2.0-alpha.tar.gz
+
+# 21.9 GB; no sha256 sidecar exists in the bucket. Record from the first
+# verified download.
+PENDING  zisk-provingkey-plonk-1.2.0-alpha.tar.gz

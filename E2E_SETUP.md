@@ -33,13 +33,11 @@ ziskup setup_snark
 `~/.zisk/provingKey`, and the PLONK proving key into
 `~/.zisk/provingKeySnark`.
 
-The resident-prover backend also needs `zisk-prove-client`. Build it from
-the ZiSK source tree at the pinned release:
-
-```bash
-git clone --branch v1.2.0-alpha https://github.com/0xPolygonHermez/zisk zisk-src
-cd zisk-src && cargo build --release -p zisk-prove-client
-```
+The resident-prover backend (`--coordinator-url`) needs nothing more: the
+daemon drives `cargo-zisk remote`, and `ziskup` has installed the coordinator
+and the worker. To skip the host install altogether, run the three processes
+as containers from [`docker/zisk-stack/`](docker/zisk-stack/README.md); its
+compose file also fetches the proving keys.
 
 ## Step 2: Clone the repositories
 
@@ -142,7 +140,9 @@ cargo run --release -- \
 
 `prover/README.md` covers the two proving backends, every CLI flag, the
 metrics, and the resident coordinator deployment that keeps the proving
-keys and the GPU loaded across proofs.
+keys and the GPU loaded across proofs. That resident layout is what
+production runs; `docker/zisk-stack/README.md` packages it as three
+container images with a compose file.
 
 ## Step 7: Verify on-chain
 

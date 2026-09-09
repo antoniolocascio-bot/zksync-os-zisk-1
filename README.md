@@ -15,6 +15,7 @@ and the off-chain verification helpers the server calls.
 | [E2E_SETUP.md](E2E_SETUP.md) | Bring-up on one machine, from toolchain install to on-chain verification. |
 | [guest-aggregator/BINDING_VECTOR.md](guest-aggregator/BINDING_VECTOR.md) | The cross-stack test vector for the aggregated-range binding digest. |
 | [tools/CORPUS.md](tools/CORPUS.md) | The EEST conformance lane. |
+| [docker/zisk-stack/README.md](docker/zisk-stack/README.md) | Deploying the lane as containers: the three images, the proving-key volume, and the compose file for one GPU machine. |
 
 ## Repository layout
 
@@ -26,7 +27,7 @@ and the off-chain verification helpers the server calls.
 | `prover/` | The proving daemon (`zksync-os-zisk-prover-service`) — polls the server's `/ZiSK/*` and `/ZiSK-AGG/*` job API, drives the ZiSK toolchain over both ELFs, and submits the results. |
 | `zisk-verifier/` | Off-chain verification helpers. The server calls them to check a submitted proof before it composes the L1 payload. |
 | `tools/` | The committed EEST native-reference corpus and target-emulation lane, the guest-memory benchmark, and host-side input assemblers. |
-| `docker/` | The pinned containers of the reproducible guest builds. |
+| `docker/` | The pinned containers of the reproducible guest builds, and `docker/zisk-stack/`: the coordinator, worker and prover images that run the ZiSK lane on a GPU machine. |
 
 The Solidity verifiers live in
 [era-contracts](https://github.com/antoniolocascio-bot/era-contracts):
