@@ -1,6 +1,10 @@
 name: Docker build and release
 
-# Builds the zksync-os-zisk-prover image and pushes it to ghcr + GAR, exactly like zksync-airbender-prover's stage-build.
+# Builds the ZiSK stack images (coordinator, worker, prover) from
+# docker/zisk-stack/Dockerfile and pushes them to ghcr and GAR, plus quay on
+# release tags, like zksync-airbender-prover's stage-build. On a release tag
+# the prover image is built by release-assets.yaml instead, from the released
+# binaries, so it carries the exact bytes the release manifest pins.
 
 on:
   workflow_dispatch:
@@ -16,8 +20,11 @@ on:
       - '[0-9]*'
   pull_request:
     paths:
-      - 'docker/zksync-os-zisk-prover/**'
+      - 'docker/zisk-stack/**'
+      - 'prover/**'
+      - 'guest-aggregator/**'
       - '.github/workflows/stage-build.yaml'
+      - '.github/workflows/sbom-analysis-reusable.yaml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -31,24 +38,62 @@ permissions:
   packages: write
   contents: read
 
-env:
-  IMAGE_NAME: zksync-os-zisk-prover
-
 jobs:
-  build-image:
-    name: Build and push zksync-os-zisk-prover
+  setup:
+    name: Compute shared image tag and targets
+    runs-on: ubuntu-latest
+    outputs:
+      sha_tag: ${{ steps.sha-tag.outputs.tag }}
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      # One timestamp so every matrix leg (and the SBOM jobs pulling the images
+      # back) agrees on a single `<sha7>-<unix-ms>` tag.
+      - name: Compute SHA tag
+        id: sha-tag
+        run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
+
+      # Release tags: the prover image comes from release-assets.yaml.
+      - name: Select targets
+        id: targets
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo 'targets=["coordinator","worker"]' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'targets=["coordinator","worker","prover"]' >> "${GITHUB_OUTPUT}"
+          fi
+
+  build-images:
+    name: Build and push zksync-os-zisk-${{ matrix.target }}
+    needs: [setup]
     runs-on: matterlabs-ci-runner-high-performance
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.setup.outputs.targets) }}
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           ref: ${{ inputs.tag_name || '' }}
 
-      # Populates out/ for the Dockerfile; both scripts exit non-zero on a hash mismatch, failing the job before any image is built.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      # The prover image copies the guest ELFs and the daemon binary from out/.
+      # Both scripts exit non-zero on an ELF hash mismatch, failing the job
+      # before any image is built; the Dockerfile re-verifies the copies.
       - name: Build the guest ELFs in the pinned containers
+        if: matrix.target == 'prover'
         run: |
           ./build-guest.sh
           ./build-aggregator.sh
+
+      - name: Build the daemon binary in a container
+        if: matrix.target == 'prover'
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -f docker/zisk-stack/Dockerfile --target prover-export -o out .
+          ls -la out
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -57,55 +102,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull-rate-limit relief only; the org credential has no push rights on Docker Hub (airbender pushes only to ghcr + GAR too).
+      # Pull-rate-limit relief only; the org credential has no push rights on Docker Hub.
       - name: Login to Docker Hub
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Ambient runner identity, no stored key — the self-hosted runners carry GCP credentials.
+      # Ambient runner identity, no stored key; the self-hosted runners carry GCP credentials.
       - name: Login to Google Artifact Registry
         run: gcloud auth configure-docker us-docker.pkg.dev -q
 
-      - name: Compute SHA tag
-        id: sha-tag
-        run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
+      # Quay only receives release images (numeric tags).
+      - name: Login to Quay.io
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
         with:
           images: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
-            us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ env.IMAGE_NAME }}
+            ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}
+            us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/zksync-os-zisk-${{ matrix.target }}
+            name=quay.io/matterlabs_enterprise/zksync-os-zisk-${{ matrix.target }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
           tags: |
             type=raw,value=${{ inputs.tag_name }},enable=${{ inputs.tag_name != '' }}
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=raw,value=${{ steps.sha-tag.outputs.tag }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.setup.outputs.sha_tag }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=ref,event=pr
 
       - name: Define whether to save cache
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         id: set-cache-to
-        run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
 
       - name: Build and push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
-          build-args: |
-            SCCACHE_GCS_BUCKET=matterlabs-infra-sccache-storage
-            SCCACHE_GCS_SERVICE_ACCOUNT=gha-ci-runners@matterlabs-infra.iam.gserviceaccount.com
-            SCCACHE_GCS_RW_MODE=READ_WRITE
-            RUSTC_WRAPPER=sccache
-          file: docker/zksync-os-zisk-prover/Dockerfile
+          file: docker/zisk-stack/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event_name != 'pull_request' }}
-          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-prover:buildcache'
+          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}:buildcache'
           cache-to: ${{ steps.set-cache-to.outputs.cache-to }}
+
+  sbom-generation:
+    name: SBOM
+    needs: [setup, build-images]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/sbom-analysis-reusable.yaml
+    secrets: inherit
+    with:
+      version: ${{ inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || needs.setup.outputs.sha_tag }}
+      images: ${{ needs.setup.outputs.targets }}
