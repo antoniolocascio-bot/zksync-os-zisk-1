@@ -1,6 +1,6 @@
 # Reusable workflow: generates SBOMs (Software Bill of Materials) for the
-# source tree and for each ZiSK stack container image, then uploads them to
-# Dependency Track for vulnerability and license tracking. Mirrors the
+# source tree and for the ZiSK stack container image, then uploads them to
+# Dependency Track for vulnerability and license tracking. Same shape as the
 # airbender prover's workflow.
 #
 # An SBOM is a machine-readable inventory of every library and component in a
@@ -16,8 +16,8 @@
 #                          aggregates the child projects below.
 #   sbom-code              scans the source tree with Syft and uploads
 #                          "<repo>-code".
-#   sbom-image             (matrix) pulls each image from GHCR, scans it, and
-#                          uploads "<repo>-<image>-image".
+#   sbom-image             pulls the image from GHCR, scans it, and uploads
+#                          "<repo>-image".
 #
 # Required repository configuration:
 #   vars.DEPENDENCY_TRACK_SERVER_HOSTNAME, vars.DEPENDENCY_TRACK_PARENT_PROJECT_UUID,
@@ -32,11 +32,6 @@ on:
         description: Version string to sync (a release tag or the sha tag)
         required: true
         type: string
-      images:
-        description: JSON list of image targets built for this version (coordinator, worker, prover)
-        required: false
-        type: string
-        default: '["coordinator","worker","prover"]'
 
 jobs:
   create-parent-project:
@@ -91,24 +86,20 @@ jobs:
           parentversion: ${{ inputs.version }}
 
   sbom-image:
-    name: Generate and upload SBOM of the container images
+    name: Generate and upload SBOM of the container image
     needs: create-parent-project
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
-    strategy:
-      fail-fast: false
-      matrix:
-        image: ${{ fromJson(inputs.images) }}
     steps:
       - name: Generate CycloneDX file on image analysis
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.image }}:${{ inputs.version }}
+          image: ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-prover:${{ inputs.version }}
           registry-username: ${{ github.repository_owner }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-          output-file: "bom-${{ matrix.image }}-image.cdx.json"
+          output-file: "bom-image.cdx.json"
           format: 'cyclonedx-json@1.6'
           upload-artifact: 'false'
           upload-release-assets: 'false'
@@ -118,10 +109,10 @@ jobs:
         with:
           serverhostname: ${{ vars.DEPENDENCY_TRACK_SERVER_HOSTNAME }}
           apikey: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
-          projectname: "${{ github.event.repository.name }}-${{ matrix.image }}-image"
+          projectname: "${{ github.event.repository.name }}-image"
           projectversion: ${{ inputs.version }}
           isLatest: true
-          bomfilename: "bom-${{ matrix.image }}-image.cdx.json"
+          bomfilename: "bom-image.cdx.json"
           autocreate: true
           parentname: ${{ github.event.repository.name }}
           parentversion: ${{ inputs.version }}

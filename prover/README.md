@@ -8,7 +8,7 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 
 The daemon has two proving backends:
 
-- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.2.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages the three as container images with a compose file.
+- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.2.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
 - **Per-proof process**. Without `--coordinator-url`, each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation. This mode also passes `-y`, so the PLONK wrap is verified through the external `snarkjs` executable, which must then be on `PATH`.
 
 ### Architecture
@@ -162,8 +162,8 @@ distinguishable in server logs.
 ### Resident prover service
 
 A coordinator and its workers keep the proving keys and the GPU loaded
-across proofs. The container images in
-[`docker/zisk-stack/`](../docker/zisk-stack/README.md) run this layout with
+across proofs. The container image in
+[`docker/zisk-stack/`](../docker/zisk-stack/README.md) runs this layout with
 one `docker compose up`; the same three processes on a host look like this.
 Start the coordinator first; it serves clients on port 7000 and workers on
 the internal cluster port 50051:

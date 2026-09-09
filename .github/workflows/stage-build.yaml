@@ -1,10 +1,10 @@
 name: Docker build and release
 
-# Builds the ZiSK stack images (coordinator, worker, prover) from
-# docker/zisk-stack/Dockerfile and pushes them to ghcr and GAR, plus quay on
-# release tags, like zksync-airbender-prover's stage-build. On a release tag
-# the prover image is built by release-assets.yaml instead, from the released
-# binaries, so it carries the exact bytes the release manifest pins.
+# Builds the ZiSK stack image (docker/zisk-stack/Dockerfile: coordinator,
+# GPU worker, prover daemon and key preparation in one image) and pushes it
+# to ghcr and GAR, like zksync-airbender-prover's stage-build. Release tags
+# are not built here: release-assets.yaml builds the image from the released
+# binaries, so the daemon inside it is the one the release manifest pins.
 
 on:
   workflow_dispatch:
@@ -16,8 +16,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - '[0-9]*'
   pull_request:
     paths:
       - 'docker/zisk-stack/**'
@@ -38,38 +36,26 @@ permissions:
   packages: write
   contents: read
 
+env:
+  IMAGE_NAME: zksync-os-zisk-prover
+
 jobs:
   setup:
-    name: Compute shared image tag and targets
+    name: Compute shared image tag
     runs-on: ubuntu-latest
     outputs:
       sha_tag: ${{ steps.sha-tag.outputs.tag }}
-      targets: ${{ steps.targets.outputs.targets }}
     steps:
-      # One timestamp so every matrix leg (and the SBOM jobs pulling the images
-      # back) agrees on a single `<sha7>-<unix-ms>` tag.
+      # One timestamp so the build and the SBOM job agree on a single
+      # `<sha7>-<unix-ms>` tag.
       - name: Compute SHA tag
         id: sha-tag
         run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
 
-      # Release tags: the prover image comes from release-assets.yaml.
-      - name: Select targets
-        id: targets
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            echo 'targets=["coordinator","worker"]' >> "${GITHUB_OUTPUT}"
-          else
-            echo 'targets=["coordinator","worker","prover"]' >> "${GITHUB_OUTPUT}"
-          fi
-
-  build-images:
-    name: Build and push zksync-os-zisk-${{ matrix.target }}
+  build-image:
+    name: Build and push zksync-os-zisk-prover
     needs: [setup]
     runs-on: matterlabs-ci-runner-high-performance
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJson(needs.setup.outputs.targets) }}
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -79,17 +65,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
 
-      # The prover image copies the guest ELFs and the daemon binary from out/.
-      # Both scripts exit non-zero on an ELF hash mismatch, failing the job
-      # before any image is built; the Dockerfile re-verifies the copies.
+      # The image copies the guest ELFs and the daemon binary from out/. Both
+      # scripts exit non-zero on an ELF hash mismatch, failing the job before
+      # any image is built; the Dockerfile re-verifies the copies.
       - name: Build the guest ELFs in the pinned containers
-        if: matrix.target == 'prover'
         run: |
           ./build-guest.sh
           ./build-aggregator.sh
 
       - name: Build the daemon binary in a container
-        if: matrix.target == 'prover'
         run: |
           docker buildx build --platform linux/amd64 \
             -f docker/zisk-stack/Dockerfile --target prover-export -o out .
@@ -118,26 +102,15 @@ jobs:
         if: ${{ github.event_name != 'pull_request' }}
         run: gcloud auth configure-docker us-docker.pkg.dev -q
 
-      # Quay only receives release images (numeric tags).
-      - name: Login to Quay.io
-        if: ${{ startsWith(github.ref, 'refs/tags/') }}
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_TOKEN }}
-
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
         with:
           images: |
-            ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}
-            us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/zksync-os-zisk-${{ matrix.target }}
-            name=quay.io/matterlabs_enterprise/zksync-os-zisk-${{ matrix.target }},enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+            us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ inputs.tag_name }},enable=${{ inputs.tag_name != '' }}
-            type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=raw,value=${{ needs.setup.outputs.sha_tag }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=ref,event=pr
@@ -145,19 +118,19 @@ jobs:
       - name: Define whether to save cache
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         id: set-cache-to
-        run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
+        run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
 
       - name: Build and push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: docker/zisk-stack/Dockerfile
-          target: ${{ matrix.target }}
+          target: stack
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event_name != 'pull_request' }}
-          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-${{ matrix.target }}:buildcache'
+          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:buildcache'
           cache-to: ${{ steps.set-cache-to.outputs.cache-to }}
 
   # Runs only once the Dependency Track endpoint is configured for this
@@ -166,7 +139,7 @@ jobs:
   # than failing every push to main.
   sbom-generation:
     name: SBOM
-    needs: [setup, build-images]
+    needs: [setup, build-image]
     if: github.event_name != 'pull_request' && vars.DEPENDENCY_TRACK_SERVER_HOSTNAME != ''
     permissions:
       contents: read
@@ -174,5 +147,4 @@ jobs:
     uses: ./.github/workflows/sbom-analysis-reusable.yaml
     secrets: inherit
     with:
-      version: ${{ inputs.tag_name || (github.ref_type == 'tag' && github.ref_name) || needs.setup.outputs.sha_tag }}
-      images: ${{ needs.setup.outputs.targets }}
+      version: ${{ inputs.tag_name || needs.setup.outputs.sha_tag }}

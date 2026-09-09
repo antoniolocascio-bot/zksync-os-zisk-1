@@ -201,13 +201,12 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The prover image for a release is built here, from the same host-tools
+  # The stack image for a release is built here, from the same host-tools
   # tarball and guest ELFs the release publishes, so the daemon binary inside
-  # it is byte-identical to the one the release manifest pins. The coordinator
-  # and worker images carry only ZiSK's pinned tarball and are built by
-  # stage-build.yaml on the tag push.
-  prover-image:
-    name: Prover image from the released binaries
+  # it is byte-identical to the one the release manifest pins. The ZiSK
+  # binaries in it come from the pinned toolchain tarball.
+  stack-image:
+    name: Stack image from the released binaries
     needs: [guest-elfs, host-tools]
     runs-on: matterlabs-ci-runner-high-performance
     permissions:
@@ -231,8 +230,8 @@ jobs:
           name: zksync-os-zisk-prover-${{ env.TAG }}-${{ env.TARGET }}.tar.gz
           path: host-artifact
 
-      # out/ is what docker/zisk-stack/Dockerfile's prover target copies. The
-      # pins are re-checked here so a mismatch fails before any image build.
+      # out/ is what docker/zisk-stack/Dockerfile copies. The pins are
+      # re-checked here so a mismatch fails before any image build.
       - name: Stage the released binaries in out/
         run: |
           mkdir -p out
@@ -287,7 +286,7 @@ jobs:
         with:
           context: .
           file: docker/zisk-stack/Dockerfile
-          target: prover
+          target: stack
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -352,7 +351,7 @@ jobs:
 
           ### Container images
 
-          \`zksync-os-zisk-coordinator\`, \`zksync-os-zisk-worker\` and \`zksync-os-zisk-prover\`, tagged \`${TAG}\`, on \`ghcr.io/${GITHUB_REPOSITORY_OWNER}\`, \`us-docker.pkg.dev/matterlabs-infra/matterlabs-docker\` and \`quay.io/matterlabs_enterprise\`. The prover image carries the host-tools binary and guest ELFs listed above; \`docker/zisk-stack/README.md\` describes the stack.
+          \`zksync-os-zisk-prover:${TAG}\` on \`ghcr.io/${GITHUB_REPOSITORY_OWNER}\`, \`us-docker.pkg.dev/matterlabs-infra/matterlabs-docker\` and \`quay.io/matterlabs_enterprise\`: the ZiSK coordinator, GPU worker, prover daemon and key preparation in one image, with the host-tools binary and guest ELFs listed above. \`docker/zisk-stack/README.md\` describes the stack.
           ENDBODY
           printf '%s\n\n' "${BODY}" | cat - binaries.md > updated_body.md
           gh release edit "${TAG}" --notes-file updated_body.md -R "${GITHUB_REPOSITORY}"

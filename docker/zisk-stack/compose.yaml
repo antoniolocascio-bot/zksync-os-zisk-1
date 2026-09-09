@@ -1,6 +1,7 @@
 # The ZiSK proving stack on one GPU machine: a resident coordinator, one GPU
 # worker that holds the proving keys, and the ZKsync OS prover daemon that
-# feeds them batches from the sequencer.
+# feeds them batches from the sequencer. All four services run the same image;
+# the command picks the process.
 #
 #   cp .env.example .env      # set ZISK_SEQUENCER_URL, image tag, GPU
 #   docker compose up -d      # first start downloads 26 GB of keys
@@ -18,6 +19,8 @@
 
 name: zisk-stack
 
+x-image: &image ${ZISK_STACK_IMAGE:-ghcr.io/matter-labs/zksync-os-zisk-prover:${ZISK_STACK_TAG:-latest}}
+
 x-gpu: &gpu
   deploy:
     resources:
@@ -29,7 +32,8 @@ x-gpu: &gpu
 
 services:
   coordinator:
-    image: ${ZISK_COORDINATOR_IMAGE:-${ZISK_STACK_REGISTRY:-ghcr.io/matter-labs}/zksync-os-zisk-coordinator:${ZISK_STACK_TAG:-latest}}
+    image: *image
+    command: ["zisk-coordinator", "--config", "/etc/zisk/coordinator.toml"]
     restart: unless-stopped
     environment:
       RUST_LOG: ${RUST_LOG:-info}
@@ -41,16 +45,21 @@ services:
     volumes:
       # Uploaded ELFs, re-sent to a reconnecting worker.
       - coordinator-cache:/var/cache/zisk
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9090/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
   # One-shot: fetch, verify and install the proving keys into the key volume
   # and generate the constant trees. Exits 0 immediately when the volume
   # already holds keys for the image's ZiSK version.
   prepare-keys:
-    image: ${ZISK_WORKER_IMAGE:-${ZISK_STACK_REGISTRY:-ghcr.io/matter-labs}/zksync-os-zisk-worker:${ZISK_STACK_TAG:-latest}}
+    image: *image
     <<: *gpu
     user: root
-    entrypoint: ["zisk-prepare-keys"]
-    command: []
+    command: ["zisk-prepare-keys"]
     restart: "no"
     environment:
       ZISK_KEYS_ALLOW_UNPINNED: ${ZISK_KEYS_ALLOW_UNPINNED:-0}
@@ -59,7 +68,7 @@ services:
       - zisk-keys:/opt/zisk/keys
 
   worker:
-    image: ${ZISK_WORKER_IMAGE:-${ZISK_STACK_REGISTRY:-ghcr.io/matter-labs}/zksync-os-zisk-worker:${ZISK_STACK_TAG:-latest}}
+    image: *image
     <<: *gpu
     restart: unless-stopped
     depends_on:
@@ -72,6 +81,7 @@ services:
     # use the ASM emulator (faster witness generation, needs the memlock
     # ulimit below and the build toolchain the image carries).
     command:
+      - zisk-worker
       - --config
       - /etc/zisk/worker.toml
       - --proving-key
@@ -94,7 +104,7 @@ services:
       - worker-cache:/var/cache/zisk
 
   prover:
-    image: ${ZISK_PROVER_IMAGE:-${ZISK_STACK_REGISTRY:-ghcr.io/matter-labs}/zksync-os-zisk-prover:${ZISK_STACK_TAG:-latest}}
+    image: *image
     restart: unless-stopped
     depends_on:
       coordinator:
@@ -102,6 +112,7 @@ services:
       worker:
         condition: service_started
     command:
+      - zksync-os-zisk-prover-service
       - --sequencer-url
       - ${ZISK_SEQUENCER_URL:?set ZISK_SEQUENCER_URL in .env}
       - --coordinator-url
@@ -123,6 +134,12 @@ services:
       - "127.0.0.1:3313:3313"
     volumes:
       - prover-work:/var/lib/zisk-prover
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3313/metrics"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
 
 volumes:
   # 26 GB of tarballs during installation, roughly 40 GB of keys after.

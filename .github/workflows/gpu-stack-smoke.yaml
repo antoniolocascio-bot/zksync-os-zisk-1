@@ -1,6 +1,6 @@
 name: GPU stack smoke test
 
-# Boots the ZiSK stack images (coordinator, worker, prover) on the GPU runner
+# Boots the ZiSK stack image (coordinator, worker, daemon) on the GPU runner
 # and proves one deterministic fixture batch through the coordinator, once as
 # a vadcop_final proof and once PLONK-wrapped, then checks both outputs with
 # the repository's host tools: the vadcop stream parses for the aggregator,
@@ -103,7 +103,7 @@ jobs:
           name: zisk-stack-smoke-bundle
           path: bundle
 
-      - name: Build the stack images from the bundle
+      - name: Build the stack image from the bundle
         run: |
           set -euo pipefail
           mkdir -p out
@@ -124,8 +124,7 @@ jobs:
           sudo mkdir -p "$KEYS_HOST_DIR"
           cat > docker/zisk-stack/.env <<EOT
           ZISK_SEQUENCER_URL=http://unused.invalid:3124
-          ZISK_STACK_REGISTRY=local
-          ZISK_STACK_TAG=smoke
+          ZISK_STACK_IMAGE=local/zksync-os-zisk-prover:smoke
           ZISK_KEYS_ALLOW_UNPINNED=${ALLOW_UNPINNED}
           CUDA_VISIBLE_DEVICES=0
           EOT
@@ -157,9 +156,8 @@ jobs:
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 1800))
-          until docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps \
-                  --entrypoint cargo-zisk prover \
-                  remote --coordinator http://coordinator:7000 setup -e /app/elf/zksync-os-zisk-guest; do
+          until docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
+                  cargo-zisk remote --coordinator http://coordinator:7000 setup -e /app/elf/zksync-os-zisk-guest; do
             (( SECONDS < deadline )) || { echo "::error::no worker registered within 30 minutes"; exit 1; }
             echo "worker not ready yet; retrying in 30s"
             sleep 30
@@ -170,9 +168,8 @@ jobs:
         run: |
           set -euo pipefail
           run() {
-            docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps \
-              --entrypoint cargo-zisk prover \
-              remote --coordinator http://coordinator:7000 prove \
+            docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
+              cargo-zisk remote --coordinator http://coordinator:7000 prove \
               -e /app/elf/zksync-os-zisk-guest -i /session/batch-1.bin --timeout 0 "$@"
           }
           run -o /session/proof-vadcop.bin

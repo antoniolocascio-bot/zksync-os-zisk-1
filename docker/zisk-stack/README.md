@@ -1,34 +1,36 @@
-# ZiSK proving stack images
+# ZiSK proving stack image
 
-Three images, built from one [`Dockerfile`](Dockerfile) with `--target`, run
-the ZiSK second proof system on a GPU machine in coordinator mode: the
-proving keys and the GPU load once into a resident worker, and every proof
-after that reuses them.
+One image, `zksync-os-zisk-prover`, runs the ZiSK second proof system on a
+GPU machine in coordinator mode: the proving keys and the GPU load once into
+a resident worker, and every proof after that reuses them. The image holds
+all four programs; the container command picks one.
 
-| Image | Target | Contents | Needs |
-|---|---|---|---|
-| `zksync-os-zisk-coordinator` | `coordinator` | `zisk-coordinator` from the pinned ZiSK tarball | CPU only |
-| `zksync-os-zisk-worker` | `worker` | `zisk-worker` (GPU build), `cargo-zisk-dev`, the ASM setup toolchain, `zisk-prepare-keys` | an NVIDIA GPU, the key volume |
-| `zksync-os-zisk-prover` | `prover` | `zksync-os-zisk-prover-service`, both hash-verified guest ELFs, the CPU `cargo-zisk` | the sequencer and the coordinator |
+| Command | Role | Needs |
+|---|---|---|
+| `zisk-coordinator --config /etc/zisk/coordinator.toml` | Job queue and client API | CPU only |
+| `zisk-worker --config /etc/zisk/worker.toml ...` | Proves. Holds the STARK and PLONK proving keys resident | an NVIDIA GPU, the key volume |
+| `zksync-os-zisk-prover-service ...` | Polls the sequencer, drives the coordinator through `cargo-zisk remote` | the sequencer and the coordinator |
+| `zisk-prepare-keys` | One-shot: downloads, verifies and installs the proving keys | the GPU (constant-tree generation), the key volume |
 
-Every ZiSK binary comes out of the same release tarball, verified against the
-sha256 pinned in the Dockerfile before extraction. Nothing from ZiSK is
-compiled in these images, and none of them carries `snarkjs` or Node.js: the
-coordinator path never verifies a wrapped proof locally, and the daemon's
-`cargo-zisk remote` calls have no verify flag. The GPU worker links only the
-driver's `libcuda.so.1`, which the NVIDIA container toolkit mounts at run
-time, so the images sit on plain Ubuntu rather than a CUDA runtime image. The
-tarball is x86_64 only, so the images are `linux/amd64`.
+One tag pins coordinator, worker and daemon together. Every ZiSK binary comes
+out of the same release tarball, verified against the sha256 pinned in the
+Dockerfile before extraction. Nothing from ZiSK is compiled in the image, and
+it carries no `snarkjs` or Node.js: the coordinator path never verifies a
+wrapped proof locally, and the daemon's `cargo-zisk remote` calls have no
+verify flag. The GPU binaries link only the driver's `libcuda.so.1`, which the
+NVIDIA container toolkit mounts at run time, so the image sits on plain
+Ubuntu rather than a CUDA runtime image. The tarball is x86_64 only, so the
+image is `linux/amd64`.
 
 ## Proving keys
 
 The STARK key (3.8 GB compressed) and the PLONK key (21.9 GB compressed)
-are not in any image. `zisk-prepare-keys`, shipped in the worker image and
-run as a one-shot service before the worker, downloads both from Polygon's
-`zisk-setup` bucket for the image's ZiSK version, checks the bucket's md5
-sidecars and the sha256 pins in [`keys.sha256`](keys.sha256), extracts them
-into the key volume, and runs the same constant-tree generation `ziskup`
-performs. A marker in the volume makes later runs a no-op.
+are not in the image. `zisk-prepare-keys`, run as a one-shot service before
+the worker, downloads both from Polygon's `zisk-setup` bucket for the
+image's ZiSK version, checks the bucket's md5 sidecars and the sha256 pins in
+[`keys.sha256`](keys.sha256), extracts them into the key volume, and runs the
+same constant-tree generation `ziskup` performs. A marker in the volume makes
+later runs a no-op.
 
 Both pins were recorded from full downloads whose md5 matched the sidecars.
 When a new ZiSK version rotates the keys, a pin that reads `PENDING` stops
@@ -81,25 +83,23 @@ docker/zisk-stack/build-images.sh --prover-from-docker
 docker/zisk-stack/build-images.sh --prover-from-release 0.0.6 --registry ghcr.io/matter-labs --tag 0.0.6 --push
 ```
 
-The coordinator and worker targets need nothing from this checkout beyond
-the Dockerfile. The prover target copies `out/zksync-os-zisk-guest`,
-`out/zksync-os-zisk-guest-aggregator` and `out/zksync-os-zisk-prover-service`
-from the build context and re-verifies the ELFs against the recorded
-`GUEST_ELF_SHA256` pins, so a stale `out/` cannot ship.
+The image copies `out/zksync-os-zisk-guest`, `out/zksync-os-zisk-guest-aggregator`
+and `out/zksync-os-zisk-prover-service` from the build context and
+re-verifies the ELFs against the recorded `GUEST_ELF_SHA256` pins, so a stale
+`out/` cannot ship. The ZiSK binaries come from the pinned toolchain tarball.
 
-CI builds all three on pushes to `main` (`stage-build.yaml`). On a release
-tag, `stage-build.yaml` builds the coordinator and worker images and
-`release-assets.yaml` builds the prover image from the released assets;
-release images also go to quay.
+CI builds the image on pushes to `main` (`stage-build.yaml`) and publishes
+it to GHCR and GAR. On a release, `release-assets.yaml` builds it from the
+released assets and publishes it to GHCR, GAR and quay with the release tag.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `Dockerfile`, `Dockerfile.dockerignore` | The three targets plus the `prover-export` helper |
+| `Dockerfile`, `Dockerfile.dockerignore` | The `stack` target plus the `prover-export` helper |
 | `coordinator.toml`, `coordinator-core.toml` | Coordinator service and core config (ports, JSON logs, no proof persistence) |
 | `worker.toml` | Worker config; key paths and GPU flags stay on the command line |
-| `prepare-keys.sh` | Installed as `zisk-prepare-keys` in the worker image |
+| `prepare-keys.sh` | Installed as `zisk-prepare-keys` |
 | `keys.sha256` | sha256 pins of the key tarballs |
 | `compose.yaml`, `.env.example` | Single-machine deployment |
-| `build-images.sh` | Builds the images from a checkout or a release |
+| `build-images.sh` | Builds the image from a checkout or a release |

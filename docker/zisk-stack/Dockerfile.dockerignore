@@ -1,6 +1,6 @@
 # Build context for docker/zisk-stack/Dockerfile (repo root). Everything is
-# excluded except the ELF pins, the out/ artifacts the prover target copies,
-# the stack's own config and scripts, and the two crates prover-export builds.
+# excluded except the ELF pins, the out/ artifacts the image copies, the
+# stack's own config and scripts, and the two crates prover-export builds.
 *
 !out/zksync-os-zisk-guest
 !out/zksync-os-zisk-guest-aggregator

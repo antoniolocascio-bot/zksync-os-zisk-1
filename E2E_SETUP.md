@@ -141,8 +141,8 @@ cargo run --release -- \
 `prover/README.md` covers the two proving backends, every CLI flag, the
 metrics, and the resident coordinator deployment that keeps the proving
 keys and the GPU loaded across proofs. That resident layout is what
-production runs; `docker/zisk-stack/README.md` packages it as three
-container images with a compose file.
+production runs; `docker/zisk-stack/README.md` packages it as one
+container image with a compose file.
 
 ## Step 7: Verify on-chain
 
