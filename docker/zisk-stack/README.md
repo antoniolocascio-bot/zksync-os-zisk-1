@@ -30,10 +30,12 @@ sidecars and the sha256 pins in [`keys.sha256`](keys.sha256), extracts them
 into the key volume, and runs the same constant-tree generation `ziskup`
 performs. A marker in the volume makes later runs a no-op.
 
-A pin that reads `PENDING` stops the run unless `ZISK_KEYS_ALLOW_UNPINNED=1`
-is set, in which case the run trusts the md5 alone and prints the observed
-sha256 so it can be recorded and reviewed. Plan for about 80 GB in the key
-volume during installation and 40 GB after.
+Both pins were recorded from full downloads whose md5 matched the sidecars.
+When a new ZiSK version rotates the keys, a pin that reads `PENDING` stops
+the run unless `ZISK_KEYS_ALLOW_UNPINNED=1` is set, in which case the run
+trusts the md5 alone and prints the observed sha256 so it can be recorded
+and reviewed. Plan for about 80 GB in the key volume during installation and
+40 GB after.
 
 ## Running the stack
 
